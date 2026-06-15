@@ -1,0 +1,27 @@
+{
+  "name": "market-maker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Simple TypeScript market maker example for prediction markets",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.22.1"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build:sdk": "pnpm --dir vendor/clob-client build",
+    "start": "pnpm build:sdk && tsx src/main.ts",
+    "typecheck": "pnpm build:sdk && tsc --noEmit",
+    "test": "pnpm build:sdk && vitest run"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "tsx": "^4.21.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

@@ -1,0 +1,5 @@
+packages:
+  - vendor/clob-client
+
+allowBuilds:
+  esbuild: true

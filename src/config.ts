@@ -1,0 +1,383 @@
+export const POLYGON = 137;
+export const AMOY = 80002;
+
+export type DiscoveryMode = "auto" | "sampling" | "site";
+export type QuoteSides = "buy" | "sell" | "both";
+
+export interface Config {
+  clobHost: string;
+  live: boolean;
+  privateKey?: string;
+  depositWallet?: string;
+  chainId?: number;
+  discovery: DiscoveryMode;
+  maxMarkets: number;
+  maxPages: number;
+  orderSize: number;
+  edgeTicks: number;
+  minSpreadTicks: number;
+  quoteSides: QuoteSides;
+  allowSingleSided: boolean;
+  respectRewardMinSize: boolean;
+  cancelBeforeQuote: boolean;
+  postOnly: boolean;
+  discoverOnly: boolean;
+  cycles: number;
+  refreshSecs: number;
+  statePath: string;
+}
+
+export const HELP_TEXT = `Usage: market-maker [options]
+
+Options:
+  --clob-host <url>                 KUEST_CLOB_HOST, default https://clob.kuest.com
+  --live / --no-live                MARKET_MAKER_LIVE, default false
+  --private-key <key>               KUEST_PRIVATE_KEY, required with --live
+  --deposit-wallet <address>        KUEST_DEPOSIT_WALLET, required with --live
+  --chain-id <id>                   KUEST_CHAIN_ID, 137 Polygon or 80002 Amoy
+  --discovery <mode>                MARKET_MAKER_DISCOVERY, auto | sampling | site
+  --max-markets <n>                 MARKET_MAKER_MAX_MARKETS, default 3
+  --max-pages <n>                   MARKET_MAKER_MAX_PAGES, default 5
+  --order-size <n>                  MARKET_MAKER_ORDER_SIZE, default 5
+  --edge-ticks <n>                  MARKET_MAKER_EDGE_TICKS, default 1
+  --min-spread-ticks <n>            MARKET_MAKER_MIN_SPREAD_TICKS, default 2
+  --quote-sides <side>              MARKET_MAKER_QUOTE_SIDES, buy | sell | both
+  --allow-single-sided              MARKET_MAKER_ALLOW_SINGLE_SIDED, default true
+  --respect-reward-min-size         MARKET_MAKER_RESPECT_REWARD_MIN_SIZE, default false
+  --cancel-before-quote             MARKET_MAKER_CANCEL_BEFORE_QUOTE, default true
+  --post-only                       MARKET_MAKER_POST_ONLY, default true
+  --discover-only                   MARKET_MAKER_DISCOVER_ONLY, default false
+  --cycles <n>                      MARKET_MAKER_CYCLES, default 1
+  --refresh-secs <n>                MARKET_MAKER_REFRESH_SECS, default 30
+  --state-path <path>               MARKET_MAKER_STATE_PATH, default state/seen-markets.json
+  --help                            Show this help message`;
+
+type CliValue = string | boolean;
+
+const knownOptions = new Set([
+  "clob-host",
+  "live",
+  "private-key",
+  "deposit-wallet",
+  "chain-id",
+  "discovery",
+  "max-markets",
+  "max-pages",
+  "order-size",
+  "edge-ticks",
+  "min-spread-ticks",
+  "quote-sides",
+  "allow-single-sided",
+  "respect-reward-min-size",
+  "cancel-before-quote",
+  "post-only",
+  "discover-only",
+  "cycles",
+  "refresh-secs",
+  "state-path",
+  "help",
+]);
+
+export function parseConfig(
+  argv = process.argv.slice(2),
+  env = process.env,
+): Config {
+  const args = parseCliArgs(argv);
+  const config: Config = {
+    clobHost: stringArg(
+      args,
+      env,
+      "clob-host",
+      "KUEST_CLOB_HOST",
+      "https://clob.kuest.com",
+    ),
+    live: booleanArg(args, env, "live", "MARKET_MAKER_LIVE", false),
+    privateKey: optionalStringArg(
+      args,
+      env,
+      "private-key",
+      "KUEST_PRIVATE_KEY",
+    ),
+    depositWallet: optionalStringArg(
+      args,
+      env,
+      "deposit-wallet",
+      "KUEST_DEPOSIT_WALLET",
+    ),
+    chainId: optionalNumberArg(args, env, "chain-id", "KUEST_CHAIN_ID"),
+    discovery: choiceArg(
+      args,
+      env,
+      "discovery",
+      "MARKET_MAKER_DISCOVERY",
+      "auto",
+      ["auto", "sampling", "site"],
+    ),
+    maxMarkets: numberArg(
+      args,
+      env,
+      "max-markets",
+      "MARKET_MAKER_MAX_MARKETS",
+      3,
+    ),
+    maxPages: numberArg(args, env, "max-pages", "MARKET_MAKER_MAX_PAGES", 5),
+    orderSize: numberArg(args, env, "order-size", "MARKET_MAKER_ORDER_SIZE", 5),
+    edgeTicks: numberArg(args, env, "edge-ticks", "MARKET_MAKER_EDGE_TICKS", 1),
+    minSpreadTicks: numberArg(
+      args,
+      env,
+      "min-spread-ticks",
+      "MARKET_MAKER_MIN_SPREAD_TICKS",
+      2,
+    ),
+    quoteSides: choiceArg(
+      args,
+      env,
+      "quote-sides",
+      "MARKET_MAKER_QUOTE_SIDES",
+      "buy",
+      ["buy", "sell", "both"],
+    ),
+    allowSingleSided: booleanArg(
+      args,
+      env,
+      "allow-single-sided",
+      "MARKET_MAKER_ALLOW_SINGLE_SIDED",
+      true,
+    ),
+    respectRewardMinSize: booleanArg(
+      args,
+      env,
+      "respect-reward-min-size",
+      "MARKET_MAKER_RESPECT_REWARD_MIN_SIZE",
+      false,
+    ),
+    cancelBeforeQuote: booleanArg(
+      args,
+      env,
+      "cancel-before-quote",
+      "MARKET_MAKER_CANCEL_BEFORE_QUOTE",
+      true,
+    ),
+    postOnly: booleanArg(
+      args,
+      env,
+      "post-only",
+      "MARKET_MAKER_POST_ONLY",
+      true,
+    ),
+    discoverOnly: booleanArg(
+      args,
+      env,
+      "discover-only",
+      "MARKET_MAKER_DISCOVER_ONLY",
+      false,
+    ),
+    cycles: numberArg(args, env, "cycles", "MARKET_MAKER_CYCLES", 1),
+    refreshSecs: numberArg(
+      args,
+      env,
+      "refresh-secs",
+      "MARKET_MAKER_REFRESH_SECS",
+      30,
+    ),
+    statePath: stringArg(
+      args,
+      env,
+      "state-path",
+      "MARKET_MAKER_STATE_PATH",
+      "state/seen-markets.json",
+    ),
+  };
+
+  validateConfig(config);
+  return config;
+}
+
+export function includesBuy(quoteSides: QuoteSides): boolean {
+  return quoteSides === "buy" || quoteSides === "both";
+}
+
+export function includesSell(quoteSides: QuoteSides): boolean {
+  return quoteSides === "sell" || quoteSides === "both";
+}
+
+function parseCliArgs(argv: string[]): Map<string, CliValue> {
+  const parsed = new Map<string, CliValue>();
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const raw = argv[index];
+    if (raw === "--") {
+      continue;
+    }
+    if (!raw.startsWith("--")) {
+      throw new Error(`unexpected positional argument: ${raw}`);
+    }
+
+    if (raw.startsWith("--no-")) {
+      const key = raw.slice(5);
+      assertKnownOption(key);
+      parsed.set(key, false);
+      continue;
+    }
+
+    const [flag, inlineValue] = raw.slice(2).split("=", 2);
+    assertKnownOption(flag);
+    if (inlineValue !== undefined) {
+      parsed.set(flag, inlineValue);
+      continue;
+    }
+
+    const next = argv[index + 1];
+    if (next && !next.startsWith("--")) {
+      parsed.set(flag, next);
+      index += 1;
+    } else {
+      parsed.set(flag, true);
+    }
+  }
+
+  return parsed;
+}
+
+function assertKnownOption(key: string): void {
+  if (!knownOptions.has(key)) {
+    throw new Error(`unknown option --${key}`);
+  }
+}
+
+function optionalStringArg(
+  args: Map<string, CliValue>,
+  env: NodeJS.ProcessEnv,
+  key: string,
+  envKey: string,
+): string | undefined {
+  const value = args.get(key) ?? env[envKey];
+  if (value === undefined || value === false) {
+    return undefined;
+  }
+  const normalized = String(value).trim();
+  return normalized || undefined;
+}
+
+function stringArg(
+  args: Map<string, CliValue>,
+  env: NodeJS.ProcessEnv,
+  key: string,
+  envKey: string,
+  fallback: string,
+): string {
+  return optionalStringArg(args, env, key, envKey) ?? fallback;
+}
+
+function optionalNumberArg(
+  args: Map<string, CliValue>,
+  env: NodeJS.ProcessEnv,
+  key: string,
+  envKey: string,
+): number | undefined {
+  const value = optionalStringArg(args, env, key, envKey);
+  return value === undefined ? undefined : parseNumber(value, key);
+}
+
+function numberArg(
+  args: Map<string, CliValue>,
+  env: NodeJS.ProcessEnv,
+  key: string,
+  envKey: string,
+  fallback: number,
+): number {
+  return optionalNumberArg(args, env, key, envKey) ?? fallback;
+}
+
+function booleanArg(
+  args: Map<string, CliValue>,
+  env: NodeJS.ProcessEnv,
+  key: string,
+  envKey: string,
+  fallback: boolean,
+): boolean {
+  const raw = args.get(key);
+  if (typeof raw === "boolean") {
+    return raw;
+  }
+  if (typeof raw === "string") {
+    return parseBoolean(raw, key);
+  }
+  const envValue = env[envKey];
+  return envValue === undefined ? fallback : parseBoolean(envValue, envKey);
+}
+
+function choiceArg<T extends string>(
+  args: Map<string, CliValue>,
+  env: NodeJS.ProcessEnv,
+  key: string,
+  envKey: string,
+  fallback: T,
+  choices: T[],
+): T {
+  const value = stringArg(args, env, key, envKey, fallback).toLowerCase();
+  if (choices.includes(value as T)) {
+    return value as T;
+  }
+  throw new Error(`${envKey} must be one of: ${choices.join(", ")}`);
+}
+
+function parseBoolean(value: string, name: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  throw new Error(`${name} must be true or false`);
+}
+
+function parseNumber(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${name} must be a number`);
+  }
+  return parsed;
+}
+
+function validateConfig(config: Config): void {
+  if (config.maxMarkets <= 0) {
+    throw new Error("MARKET_MAKER_MAX_MARKETS must be greater than zero");
+  }
+  if (config.maxPages <= 0) {
+    throw new Error("MARKET_MAKER_MAX_PAGES must be greater than zero");
+  }
+  if (config.orderSize <= 0) {
+    throw new Error("MARKET_MAKER_ORDER_SIZE must be greater than zero");
+  }
+  if (config.edgeTicks <= 0) {
+    throw new Error("MARKET_MAKER_EDGE_TICKS must be greater than zero");
+  }
+  if (config.minSpreadTicks <= 0) {
+    throw new Error("MARKET_MAKER_MIN_SPREAD_TICKS must be greater than zero");
+  }
+  if (config.cycles <= 0) {
+    throw new Error("MARKET_MAKER_CYCLES must be greater than zero");
+  }
+  if (!config.live) {
+    return;
+  }
+  if (!config.privateKey) {
+    throw new Error("--live requires KUEST_PRIVATE_KEY or --private-key");
+  }
+  if (!config.depositWallet) {
+    throw new Error("--live requires KUEST_DEPOSIT_WALLET or --deposit-wallet");
+  }
+  if (config.chainId === undefined) {
+    throw new Error(
+      "--live requires KUEST_CHAIN_ID or --chain-id; use 137 for Polygon or 80002 for Amoy",
+    );
+  }
+  if (config.chainId !== POLYGON && config.chainId !== AMOY) {
+    throw new Error(
+      `unsupported chain id ${config.chainId}; SDK supports ${POLYGON} and ${AMOY}`,
+    );
+  }
+}

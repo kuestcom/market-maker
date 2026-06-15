@@ -1,0 +1,10 @@
+.env
+node_modules/
+dist/
+coverage/
+state/
+vendor/
+*.tsbuildinfo
+vitest.config.js
+src/**/*.js
+tests/**/*.js

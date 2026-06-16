@@ -40,22 +40,18 @@ pnpm run start
 
 ## Live Trading
 
-Live mode requires explicit signing configuration:
+Start live mode with:
 
 ```bash
-KUEST_PRIVATE_KEY=0x... \
-KUEST_DEPOSIT_WALLET=0x... \
-KUEST_CHAIN_ID=137 \
 pnpm run start -- --live
 ```
 
-Use `KUEST_CHAIN_ID=80002` for Amoy when that is the target chain.
+Live mode requires `KUEST_PRIVATE_KEY`, `KUEST_DEPOSIT_WALLET`, and
+`KUEST_CHAIN_ID`. You can also pass them as `--private-key`,
+`--deposit-wallet`, and `--chain-id`. Use chain id `137` for Polygon or `80002`
+for Amoy.
 
-By default live mode only posts buy orders:
-
-```bash
-MARKET_MAKER_QUOTE_SIDES=buy pnpm run start -- --live
-```
+By default live mode only posts buy orders.
 
 Use sell-side quoting only when the deposit wallet already owns outcome tokens
 for the market:

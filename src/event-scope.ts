@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { errorMessage } from "./errors.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -150,8 +151,4 @@ function withTrailingSlash(value: string): string {
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown error";
 }

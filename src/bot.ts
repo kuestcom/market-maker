@@ -24,6 +24,7 @@ import {
   includesSell,
 } from "./config.js";
 import { conditionIdFromMarket, conditionIdsFromSiteConfig } from "./event-scope.js";
+import { errorMessage } from "./errors.js";
 import { ceilToTick, fairPrice, floorToTick, isTradeablePrice } from "./pricing.js";
 import {
   clearPauseState,
@@ -368,17 +369,19 @@ export class MarketExposure {
 }
 
 export class RiskBudget {
-  private remaining: number;
   private readonly collateralLimit: number;
+  private reservedNewCollateral = 0;
   private readonly countedOpenBuyOrders = new Map<string, number>();
 
   constructor(collateralLimit: number) {
     this.collateralLimit = Math.max(collateralLimit, 0);
-    this.remaining = this.collateralLimit;
   }
 
   remainingCollateral(): number {
-    return Math.max(this.remaining, 0);
+    return Math.max(
+      this.collateralLimit - this.reservedCollateral() - this.reservedNewCollateral,
+      0,
+    );
   }
 
   reserveOpenBuyOrder(order: OpenOrder): void {
@@ -388,7 +391,6 @@ export class RiskBudget {
     const collateral = openOrderRemainingSize(order) * numberOrDefault(order.price, 0);
     const reserved = Math.max(collateral, 0);
     this.countedOpenBuyOrders.set(order.id, reserved);
-    this.remaining = Math.max(this.remaining - reserved, 0);
   }
 
   releaseOpenBuyOrder(order: OpenOrder): void {
@@ -400,7 +402,6 @@ export class RiskBudget {
       return;
     }
     this.countedOpenBuyOrders.delete(order.id);
-    this.remaining = Math.min(this.remaining + reserved, this.collateralLimit);
   }
 
   reservedCollateral(): number {
@@ -412,7 +413,7 @@ export class RiskBudget {
 
   reserveNewCollateral(requested: number): number {
     const reserved = Math.min(Math.max(requested, 0), this.remainingCollateral());
-    this.remaining = Math.max(this.remaining - reserved, 0);
+    this.reservedNewCollateral += reserved;
     return reserved;
   }
 }
@@ -971,8 +972,9 @@ async function preflightRiskAudit(
     if (config.pauseOnRiskBreach) {
       await savePauseReason(config.pausePath, reason);
       console.log(`wrote pause file ${config.pausePath}: ${reason}`);
+      return { result: "stop" };
     }
-    return { result: "stop" };
+    return { result: "skipCycle" };
   }
 
   return { result: "continue", riskBudget: globalBudget };
@@ -1777,10 +1779,6 @@ export function staleInputReason(
 
 function nowMs(): number {
   return Date.now();
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown error";
 }
 
 async function openOrdersForToken(

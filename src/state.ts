@@ -1,5 +1,6 @@
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { errorMessage } from "./errors.js";
 
 export interface SeenMarkets {
   markets: Set<string>;
@@ -117,8 +118,4 @@ function isPauseStateJson(
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown error";
 }

@@ -6,6 +6,7 @@ import {
     bandContainsPrice,
     bandMissingSize,
     buildQuotePlan,
+    cancelScopeOrders,
     cancellableOrders,
     isOpenOrder,
     liquidityRejectReason,
@@ -184,6 +185,28 @@ describe("bot feature #1", () => {
                 { tokens: [{ token_id: "yes" }, { token_id: "maybe" }] },
             ]),
         ).toEqual(["yes", "no", "maybe"]);
+    });
+
+    it("falls back to discovered scope when managed cancel scope is empty", async () => {
+        const checkedTokenIds: string[] = [];
+        const publicClient = {
+            getSamplingMarkets: async () => ({ data: [market("market")], next_cursor: "LTE=" }),
+        };
+        const liveClient = {
+            getOpenOrders: async (params: { asset_id: string }) => {
+                checkedTokenIds.push(params.asset_id);
+                return [];
+            },
+        };
+
+        await cancelScopeOrders(
+            publicClient as never,
+            liveClient as never,
+            config(),
+            [],
+        );
+
+        expect(checkedTokenIds).toEqual(["yes"]);
     });
 
     it("rejects missing two-sided liquidity", () => {

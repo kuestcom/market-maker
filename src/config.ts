@@ -617,7 +617,7 @@ function validateConfig(config: Config): void {
     );
   }
   if ((config.cancelAll || config.cancelAllOnExit) && !config.live) {
-    throw new Error("MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT require --live");
+    throw new Error("--cancel-all or --cancel-all-on-exit requires --live");
   }
   if (!config.live) {
     return;

@@ -74,6 +74,11 @@ interface TokenQuote {
   skipReason?: string;
 }
 
+interface ShutdownState {
+  requestedSignal?: NodeJS.Signals;
+  abortController?: AbortController;
+}
+
 class LiveMarketState {
   constructor(
     private readonly tokens: LiveTokenState[],
@@ -296,33 +301,27 @@ async function runWithCancelOnExit(
   config: Config,
 ): Promise<void> {
   const managedScope: Market[] = [];
-  let canceling = false;
-  const shutdown = (signal: NodeJS.Signals): void => {
-    if (canceling) {
+  const shutdown: ShutdownState = { abortController: new AbortController() };
+  const requestShutdown = (signal: NodeJS.Signals): void => {
+    if (shutdown.requestedSignal) {
       return;
     }
-    canceling = true;
-    void (async () => {
-      console.log(`shutdown requested: received ${signal}; canceling scoped open orders`);
-      try {
-        await cancelScopeOrders(publicClient, liveClient, config, managedScope);
-      } catch (error) {
-        console.error(error instanceof Error ? error.message : error);
-      } finally {
-        process.exit(signalExitCode(signal));
-      }
-    })();
+    shutdown.requestedSignal = signal;
+    shutdown.abortController?.abort();
+    console.log(`shutdown requested: received ${signal}; stopping quote loop before canceling scoped open orders`);
   };
 
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", requestShutdown);
+  process.once("SIGTERM", requestShutdown);
   try {
-    await runCycles(publicClient, liveClient, config, managedScope);
-  } finally {
-    if (!canceling) {
-      process.off("SIGINT", shutdown);
-      process.off("SIGTERM", shutdown);
+    await runCycles(publicClient, liveClient, config, managedScope, shutdown);
+    if (shutdown.requestedSignal) {
+      await cancelScopeOrders(publicClient, liveClient, config, managedScope);
+      process.exitCode = signalExitCode(shutdown.requestedSignal);
     }
+  } finally {
+    process.off("SIGINT", requestShutdown);
+    process.off("SIGTERM", requestShutdown);
   }
 }
 
@@ -335,10 +334,14 @@ async function runCycles(
   liveClient: ClobClient | undefined,
   config: Config,
   managedScope?: Market[],
+  shutdown?: ShutdownState,
 ): Promise<void> {
   const seen = await loadSeenMarkets(config.statePath);
 
   for (let cycle = 1; cycle <= config.cycles; cycle += 1) {
+    if (isShutdownRequested(shutdown)) {
+      return;
+    }
     const eventSlug = config.eventSlug?.trim();
     let candidates: MarketCandidate[];
     if (eventSlug) {
@@ -380,13 +383,51 @@ async function runCycles(
 
     const riskBudget = new RiskBudget(config.maxTotalCollateral);
     for (const candidate of candidates) {
-      await quoteMarket(publicClient, liveClient, candidate.market, config, riskBudget);
+      if (isShutdownRequested(shutdown)) {
+        return;
+      }
+      await quoteMarket(
+        publicClient,
+        liveClient,
+        candidate.market,
+        config,
+        riskBudget,
+        shutdown,
+      );
     }
 
     if (cycle < config.cycles) {
-      await sleep(config.refreshSecs * 1000);
+      if (isShutdownRequested(shutdown)) {
+        return;
+      }
+      await interruptibleSleep(config.refreshSecs * 1000, shutdown);
     }
   }
+}
+
+function isShutdownRequested(shutdown: ShutdownState | undefined): boolean {
+  return shutdown?.requestedSignal !== undefined;
+}
+
+async function interruptibleSleep(
+  milliseconds: number,
+  shutdown: ShutdownState | undefined,
+): Promise<void> {
+  if (!shutdown?.abortController) {
+    await sleep(milliseconds);
+    return;
+  }
+  try {
+    await sleep(milliseconds, undefined, { signal: shutdown.abortController.signal });
+  } catch (error) {
+    if (!isAbortError(error)) {
+      throw error;
+    }
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function replaceManagedScope(
@@ -562,16 +603,23 @@ async function quoteMarket(
   market: Market,
   config: Config,
   globalBudget: RiskBudget,
+  shutdown?: ShutdownState,
 ): Promise<void> {
   const marketBudget = new RiskBudget(config.maxCollateralPerMarket);
   const tokenQuotes: TokenQuote[] = [];
   for (const token of marketTokens(market)) {
+    if (isShutdownRequested(shutdown)) {
+      return;
+    }
     const tokenId = tokenIdFromToken(token);
     if (!tokenId) {
       continue;
     }
 
     const book = await publicClient.getOrderBook(tokenId);
+    if (isShutdownRequested(shutdown)) {
+      return;
+    }
     const tokenQuote = buildTokenQuote(market, token, book, config);
     if (!tokenQuote.plan) {
       console.log(
@@ -585,9 +633,15 @@ async function quoteMarket(
     tokenQuotes.push(tokenQuote);
   }
 
+  if (isShutdownRequested(shutdown)) {
+    return;
+  }
   if (liveClient) {
     const marketState = await LiveMarketState.load(liveClient, tokenQuotes);
     for (const tokenQuote of tokenQuotes) {
+      if (isShutdownRequested(shutdown)) {
+        return;
+      }
       if (tokenQuote.plan) {
         await reconcileQuotePlan(
           liveClient,
@@ -596,6 +650,7 @@ async function quoteMarket(
           globalBudget,
           marketBudget,
           marketState,
+          shutdown,
         );
       }
     }
@@ -895,7 +950,11 @@ async function reconcileQuotePlan(
   globalBudget: RiskBudget,
   marketBudget: RiskBudget,
   marketState: LiveMarketState,
+  shutdown?: ShutdownState,
 ): Promise<void> {
+  if (isShutdownRequested(shutdown)) {
+    return;
+  }
   const openOrders = marketState.openOrders(plan.tokenId);
   const ordersToCancel = cancellableOrders(openOrders, plan, config);
   if (config.cancelBeforeQuote && ordersToCancel.length > 0) {
@@ -913,6 +972,9 @@ async function reconcileQuotePlan(
     }
   }
 
+  if (isShutdownRequested(shutdown)) {
+    return;
+  }
   const canceledIds = new Set(ordersToCancel.map((order) => order.id));
   const remainingOrders = openOrders.filter((order) => !canceledIds.has(order.id));
   marketState.replaceOpenOrders(plan.tokenId, remainingOrders);
@@ -962,16 +1024,22 @@ async function reconcileQuotePlan(
             side: Side.BUY,
             price: plan.buyBand.price,
             size: decision.size,
-          };
-          if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
-            const order = await client.createOrder({
-              tokenID: plan.tokenId,
-              price: plan.buyBand.price,
-              size: decision.size,
-              side: Side.BUY,
-            });
-            reserveBuyCollateral(decision.collateral, globalBudget, marketBudget);
-            marketState.recordPendingOrder(proposedOrder);
+        };
+        if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
+          const order = await client.createOrder({
+            tokenID: plan.tokenId,
+            price: plan.buyBand.price,
+            size: decision.size,
+            side: Side.BUY,
+          });
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
+          reserveBuyCollateral(decision.collateral, globalBudget, marketBudget);
+          marketState.recordPendingOrder(proposedOrder);
             responses.push([
               Side.BUY,
               await client.postOrder(order, OrderType.GTC, false, config.postOnly),
@@ -1000,12 +1068,18 @@ async function reconcileQuotePlan(
           size,
         };
         if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
           const order = await client.createOrder({
             tokenID: plan.tokenId,
             price: plan.sellBand.price,
             size,
             side: Side.SELL,
           });
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
           marketState.recordPendingOrder(proposedOrder);
           responses.push([
             Side.SELL,
@@ -1041,7 +1115,9 @@ export async function cancelScopeOrders(
   config: Config,
   managedScope?: Market[],
 ): Promise<void> {
-  const markets = managedScope ? [...managedScope] : await discoverCancelMarkets(publicClient, config);
+  const markets = managedScope?.length
+    ? [...managedScope]
+    : await discoverCancelMarkets(publicClient, config);
   if (markets.length === 0) {
     console.log("cancel-all: no scoped markets found");
     return;

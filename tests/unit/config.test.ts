@@ -98,7 +98,7 @@ describe("config", () => {
 
     it("rejects cancel-all without live mode", () => {
         expect(() => parseConfig(["--cancel-all"], {})).toThrow(
-            "MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT require --live",
+            "--cancel-all or --cancel-all-on-exit requires --live",
         );
     });
 

@@ -22,6 +22,7 @@ describe("config", () => {
         expect(config.maxOpenOrdersPerToken).toBe(2);
         expect(config.cancelAll).toBe(false);
         expect(config.cancelAllOnExit).toBe(false);
+        expect(config.cancelOnRiskBreach).toBe(false);
         expect(config.maxDataAgeSecs).toBe(10);
     });
 
@@ -119,6 +120,12 @@ describe("config", () => {
             parseConfig(["--cancel-all", "--cancel-all-on-exit"], {}),
         ).toThrow(
             "MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT are mutually exclusive",
+        );
+    });
+
+    it("rejects cancel-on-risk-breach without live mode", () => {
+        expect(() => parseConfig(["--cancel-on-risk-breach"], {})).toThrow(
+            "--cancel-on-risk-breach requires --live",
         );
     });
 

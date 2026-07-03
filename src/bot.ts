@@ -197,6 +197,51 @@ class LiveMarketState {
     );
   }
 
+  riskBreaches(config: Config): RiskBreach[] {
+    const breaches: RiskBreach[] = [];
+    for (const token of this.tokens) {
+      const inventory = this.longInventoryForToken(token.tokenId, []);
+      if (inventory > config.maxInventoryPerToken) {
+        breaches.push({
+          kind: "tokenInventory",
+          tokenId: token.tokenId,
+          value: inventory,
+          limit: config.maxInventoryPerToken,
+        });
+      }
+    }
+
+    const marketInventory = this.longMarketInventory([]);
+    if (marketInventory > config.maxInventoryPerMarket) {
+      breaches.push({
+        kind: "marketInventory",
+        value: marketInventory,
+        limit: config.maxInventoryPerMarket,
+      });
+    }
+
+    const exposure = this.exposure();
+    const loss = exposure.worstLoss();
+    if (loss > config.maxLossPerMarket) {
+      breaches.push({
+        kind: "marketLoss",
+        value: loss,
+        limit: config.maxLossPerMarket,
+      });
+    }
+
+    const collateral = exposure.buyCollateral();
+    if (collateral > config.maxCollateralPerMarket) {
+      breaches.push({
+        kind: "marketCollateral",
+        value: collateral,
+        limit: config.maxCollateralPerMarket,
+      });
+    }
+
+    return breaches;
+  }
+
   private exposure(): MarketExposure {
     const exposure = new MarketExposure(
       this.tokens.map((token) => ({
@@ -259,6 +304,19 @@ interface InventoryBuyRoom {
   room: number;
 }
 
+export type RiskBreach =
+  | {
+      kind: "tokenInventory";
+      tokenId: string;
+      value: number;
+      limit: number;
+    }
+  | {
+      kind: "marketInventory" | "marketLoss" | "marketCollateral";
+      value: number;
+      limit: number;
+    };
+
 interface OutcomeExposure {
   tokenId: string;
   position: number;
@@ -296,11 +354,15 @@ export class MarketExposure {
         : 0;
     return Math.max(cost - proceeds - worstResolutionPayout, 0);
   }
+
+  buyCollateral(): number {
+    return this.outcomes.reduce((total, outcome) => total + outcome.cost, 0);
+  }
 }
 
 export class RiskBudget {
   private remaining: number;
-  private readonly countedOpenBuyOrders = new Set<string>();
+  private readonly countedOpenBuyOrders = new Map<string, number>();
 
   constructor(collateralLimit: number) {
     this.remaining = Math.max(collateralLimit, 0);
@@ -314,11 +376,22 @@ export class RiskBudget {
     if (order.side !== Side.BUY || this.countedOpenBuyOrders.has(order.id)) {
       return;
     }
-    this.countedOpenBuyOrders.add(order.id);
-    this.remaining = Math.max(
-      this.remaining - openOrderRemainingSize(order) * numberOrDefault(order.price, 0),
-      0,
-    );
+    const collateral = openOrderRemainingSize(order) * numberOrDefault(order.price, 0);
+    const reserved = Math.min(Math.max(collateral, 0), this.remainingCollateral());
+    this.countedOpenBuyOrders.set(order.id, reserved);
+    this.remaining = Math.max(this.remaining - reserved, 0);
+  }
+
+  releaseOpenBuyOrder(order: OpenOrder): void {
+    if (order.side !== Side.BUY) {
+      return;
+    }
+    const reserved = this.countedOpenBuyOrders.get(order.id);
+    if (reserved === undefined) {
+      return;
+    }
+    this.countedOpenBuyOrders.delete(order.id);
+    this.remaining += reserved;
   }
 
   reserveNewCollateral(requested: number): number {
@@ -1052,6 +1125,36 @@ function printPlan(plan: QuotePlan, live: boolean): void {
   );
 }
 
+function printRiskBreaches(plan: QuotePlan, breaches: RiskBreach[]): void {
+  for (const breach of breaches) {
+    console.log(
+      `risk breach ${plan.marketSlug} ${plan.outcome}: ${riskBreachMessage(breach)}`,
+    );
+  }
+}
+
+function riskBreachMessage(breach: RiskBreach): string {
+  if (breach.kind === "tokenInventory") {
+    return `token ${breach.tokenId} inventory ${breach.value} exceeds limit ${breach.limit}`;
+  }
+  if (breach.kind === "marketInventory") {
+    return `market inventory ${breach.value} exceeds limit ${breach.limit}`;
+  }
+  if (breach.kind === "marketLoss") {
+    return `market loss ${breach.value} exceeds limit ${breach.limit}`;
+  }
+  return `market buy collateral ${breach.value} exceeds limit ${breach.limit}`;
+}
+
+export function riskBreachAppliesToToken(
+  breaches: RiskBreach[],
+  tokenId: string,
+): boolean {
+  return breaches.some(
+    (breach) => breach.kind !== "tokenInventory" || breach.tokenId === tokenId,
+  );
+}
+
 function formatBand(band: QuoteBand | undefined): string {
   if (!band) {
     return "none";
@@ -1120,6 +1223,31 @@ async function reconcileQuotePlan(
   for (const order of remainingOrders) {
     globalBudget.reserveOpenBuyOrder(order);
     marketBudget.reserveOpenBuyOrder(order);
+  }
+
+  const breaches = marketState.riskBreaches(config);
+  if (breaches.length > 0) {
+    printRiskBreaches(plan, breaches);
+    if (
+      config.cancelOnRiskBreach &&
+      riskBreachAppliesToToken(breaches, plan.tokenId)
+    ) {
+      const refreshedOrders = await cancelRiskIncreasingOrders(
+        client,
+        plan,
+        openOrders,
+      );
+      if (refreshedOrders) {
+        marketState.replaceOpenOrders(plan.tokenId, refreshedOrders);
+        releaseClosedOpenBuyOrders(
+          openOrders,
+          refreshedOrders,
+          globalBudget,
+          marketBudget,
+        );
+      }
+    }
+    return;
   }
 
   const collateral = await collateralBalance(client);
@@ -1500,6 +1628,44 @@ export async function cancelOpenOrdersForMarkets(
   }
 
   return summary;
+}
+
+async function cancelRiskIncreasingOrders(
+  client: ClobClient,
+  plan: QuotePlan,
+  openOrders: OpenOrder[],
+): Promise<OpenOrder[] | undefined> {
+  const orderIds = openOrders
+    .filter((order) => sideFromOpenOrder(order.side) === Side.BUY)
+    .map((order) => order.id)
+    .filter((id) => id.length > 0);
+  if (orderIds.length === 0) {
+    return undefined;
+  }
+
+  const response = await client.cancelOrders(orderIds);
+  const canceled = responseList(response, "canceled");
+  const notCanceled = responseList(response, "not_canceled");
+  console.log(
+    `risk breach cancel ${plan.marketSlug} ${plan.outcome}: ` +
+      `canceled=${canceled.length} not_canceled=${notCanceled.length}`,
+  );
+  return openOrdersForToken(client, plan.tokenId);
+}
+
+function releaseClosedOpenBuyOrders(
+  previousOpenOrders: OpenOrder[],
+  refreshedOpenOrders: OpenOrder[],
+  globalBudget: RiskBudget,
+  marketBudget: RiskBudget,
+): void {
+  const refreshedIds = new Set(refreshedOpenOrders.map((order) => order.id));
+  for (const order of previousOpenOrders) {
+    if (sideFromOpenOrder(order.side) === Side.BUY && !refreshedIds.has(order.id)) {
+      globalBudget.releaseOpenBuyOrder(order);
+      marketBudget.releaseOpenBuyOrder(order);
+    }
+  }
 }
 
 export function managedTokenIds(markets: Market[]): string[] {

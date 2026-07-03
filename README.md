@@ -101,7 +101,10 @@ collateral already locked by live buy orders, checks sell orders against
 available outcome-token balance, respects configured collateral caps, and
 blocks quotes whose simulated fill would exceed the configured market loss cap.
 Buy-side sizing is inventory-aware: token balances, live open buys, and pending
-buys are counted before adding more long exposure to an outcome or market.
+buys are counted before adding more long exposure to an outcome or market. If
+live state already breaches inventory, loss, or market-collateral caps, the bot
+skips new quotes; with `--cancel-on-risk-breach`, it also cancels resting buy
+orders for breached tokens.
 By default, it also requires a two-sided book with acceptable spread and
 top-of-book depth before quoting.
 
@@ -248,6 +251,12 @@ top-of-book depth before quoting.
   Live-only shutdown guard. On Ctrl-C or SIGTERM, cancels open orders for the
   markets currently managed by this process and verifies whether any remain.
   Necessary when you do not want interrupted runs to leave stale GTC orders.
+
+  --cancel-on-risk-breach / MARKET_MAKER_CANCEL_ON_RISK_BREACH
+  Default: false.
+  Live-only circuit-breaker action. When current state already breaches
+  inventory, market-loss, or market-collateral caps, skip new quotes and cancel
+  resting buy orders for the breached token.
 
   --post-only / MARKET_MAKER_POST_ONLY
   Default: true.

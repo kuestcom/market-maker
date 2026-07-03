@@ -31,6 +31,7 @@ export interface Config {
   cancelBeforeQuote: boolean;
   cancelAll: boolean;
   cancelAllOnExit: boolean;
+  cancelOnRiskBreach: boolean;
   postOnly: boolean;
   requireTwoSidedLive: boolean;
   maxDataAgeSecs: number;
@@ -78,6 +79,7 @@ Options:
   --cancel-before-quote             MARKET_MAKER_CANCEL_BEFORE_QUOTE, default true
   --cancel-all                      MARKET_MAKER_CANCEL_ALL, default false
   --cancel-all-on-exit              MARKET_MAKER_CANCEL_ALL_ON_EXIT, default false
+  --cancel-on-risk-breach           MARKET_MAKER_CANCEL_ON_RISK_BREACH, default false
   --post-only                       MARKET_MAKER_POST_ONLY, default true
   --require-two-sided-live          MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE, default true
   --max-data-age-secs <n>           MARKET_MAKER_MAX_DATA_AGE_SECS, default 10
@@ -125,6 +127,7 @@ const knownOptions = new Set([
   "cancel-before-quote",
   "cancel-all",
   "cancel-all-on-exit",
+  "cancel-on-risk-breach",
   "post-only",
   "require-two-sided-live",
   "max-data-age-secs",
@@ -293,6 +296,13 @@ export function parseConfig(
       env,
       "cancel-all-on-exit",
       "MARKET_MAKER_CANCEL_ALL_ON_EXIT",
+      false,
+    ),
+    cancelOnRiskBreach: booleanArg(
+      args,
+      env,
+      "cancel-on-risk-breach",
+      "MARKET_MAKER_CANCEL_ON_RISK_BREACH",
       false,
     ),
     postOnly: booleanArg(
@@ -654,6 +664,9 @@ function validateConfig(config: Config): void {
   }
   if ((config.cancelAll || config.cancelAllOnExit) && !config.live) {
     throw new Error("--cancel-all or --cancel-all-on-exit requires --live");
+  }
+  if (config.cancelOnRiskBreach && !config.live) {
+    throw new Error("--cancel-on-risk-breach requires --live");
   }
   if (config.maxDataAgeSecs <= 0) {
     throw new Error("MARKET_MAKER_MAX_DATA_AGE_SECS must be greater than zero");

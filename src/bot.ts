@@ -1079,6 +1079,7 @@ async function quoteMarket(
       }
       if (tokenQuote.plan) {
         await reconcileQuotePlan(
+          publicClient,
           liveClient,
           tokenQuote.plan,
           config,
@@ -1365,6 +1366,53 @@ function liquidityRejectMessage(reason: LiquidityRejectReason): string {
   return `best ask depth ${reason.depth} below minimum ${reason.minDepth}`;
 }
 
+async function prePostMoveRejectReason(
+  publicClient: ClobClient,
+  plan: QuotePlan,
+  config: Config,
+): Promise<string | undefined> {
+  const book = await publicClient.getOrderBook(plan.tokenId);
+  const liquidityReason = shouldEnforceLiquidityQuality(config)
+    ? liquidityQualityRejectReason(book, config)
+    : undefined;
+  if (liquidityReason) {
+    return `refreshed book liquidity check failed: ${liquidityRejectMessage(liquidityReason)}`;
+  }
+
+  const refreshedFair = fairPrice(
+    bestBid(book.bids ?? []),
+    bestAsk(book.asks ?? []),
+    plan.fairPrice,
+    numberOrUndefined(book.last_trade_price),
+  );
+  return priceMoveRejectReason(
+    plan.fairPrice,
+    refreshedFair,
+    numberOrDefault(book.tick_size, 0),
+    config.maxPrePostMoveTicks,
+  );
+}
+
+export function priceMoveRejectReason(
+  plannedFair: number,
+  refreshedFair: number,
+  tick: number,
+  maxMoveTicks: number,
+): string | undefined {
+  if (tick <= 0) {
+    return "refreshed book tick size is invalid";
+  }
+
+  const moveTicks = Math.abs(refreshedFair - plannedFair) / tick;
+  if (moveTicks <= maxMoveTicks + Number.EPSILON * 100) {
+    return undefined;
+  }
+  return (
+    `fair moved ${moveTicks} ticks from ${plannedFair} to ${refreshedFair}; ` +
+    `max ${maxMoveTicks}`
+  );
+}
+
 function printPlan(plan: QuotePlan, live: boolean): void {
   const mode = live ? "live" : "dry-run";
   console.log(
@@ -1435,6 +1483,7 @@ function formatBand(band: QuoteBand | undefined): string {
 }
 
 async function reconcileQuotePlan(
+  publicClient: ClobClient,
   client: ClobClient,
   plan: QuotePlan,
   config: Config,
@@ -1666,6 +1715,13 @@ async function reconcileQuotePlan(
   }
 
   if (plannedOrders.length === 0 || isShutdownRequested(shutdown)) {
+    return;
+  }
+  const moveReason = await prePostMoveRejectReason(publicClient, plan, config);
+  if (moveReason) {
+    console.log(
+      `skip posting ${plan.marketSlug} ${plan.outcome}: pre-post price movement (${moveReason})`,
+    );
     return;
   }
   if (await skipLiveActionIfPaused(plan, config, "posting orders")) {

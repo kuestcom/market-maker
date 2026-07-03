@@ -14,6 +14,7 @@ import {
     managedTokenIds,
     openOrderMatchesProposed,
     preflightSnapshotForMarket,
+    priceMoveRejectReason,
     riskBreachAppliesToToken,
     staleInputReason,
     tokenLongInventory,
@@ -403,6 +404,7 @@ function config(): Config {
         pausePath: "state/paused.json",
         postOnly: true,
         requireTwoSidedLive: true,
+        maxPrePostMoveTicks: 2,
         maxDataAgeSecs: 10,
         minPrice: 0.05,
         maxPrice: 0.95,
@@ -482,6 +484,22 @@ describe("market loss guard", () => {
 
         expect(() => preflightSnapshotForMarket(snapshot, "market-b")).toThrow(
             "preflight snapshot market mismatch",
+        );
+    });
+
+    it("rejects large pre-post fair value moves", () => {
+        expect(priceMoveRejectReason(0.5, 0.53, 0.01, 2)).toContain(
+            "fair moved",
+        );
+    });
+
+    it("allows pre-post fair value moves at the configured limit", () => {
+        expect(priceMoveRejectReason(0.5, 0.52, 0.01, 2)).toBeUndefined();
+    });
+
+    it("rejects invalid refreshed book tick size", () => {
+        expect(priceMoveRejectReason(0.5, 0.5, 0, 2)).toBe(
+            "refreshed book tick size is invalid",
         );
     });
 });

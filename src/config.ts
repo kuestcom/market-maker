@@ -37,6 +37,7 @@ export interface Config {
   pausePath: string;
   postOnly: boolean;
   requireTwoSidedLive: boolean;
+  maxPrePostMoveTicks: number;
   maxDataAgeSecs: number;
   minPrice: number;
   maxPrice: number;
@@ -88,6 +89,7 @@ Options:
   --pause-path <path>               MARKET_MAKER_PAUSE_PATH, default state/paused.json
   --post-only                       MARKET_MAKER_POST_ONLY, default true
   --require-two-sided-live          MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE, default true
+  --max-pre-post-move-ticks <n>     MARKET_MAKER_MAX_PRE_POST_MOVE_TICKS, default 2
   --max-data-age-secs <n>           MARKET_MAKER_MAX_DATA_AGE_SECS, default 10
   --min-price <n>                   MARKET_MAKER_MIN_PRICE, default 0.05
   --max-price <n>                   MARKET_MAKER_MAX_PRICE, default 0.95
@@ -139,6 +141,7 @@ const knownOptions = new Set([
   "pause-path",
   "post-only",
   "require-two-sided-live",
+  "max-pre-post-move-ticks",
   "max-data-age-secs",
   "min-price",
   "max-price",
@@ -347,6 +350,13 @@ export function parseConfig(
       "require-two-sided-live",
       "MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE",
       true,
+    ),
+    maxPrePostMoveTicks: numberArg(
+      args,
+      env,
+      "max-pre-post-move-ticks",
+      "MARKET_MAKER_MAX_PRE_POST_MOVE_TICKS",
+      2,
     ),
     maxDataAgeSecs: numberArg(
       args,
@@ -710,6 +720,9 @@ function validateConfig(config: Config): void {
   }
   if (config.pauseOnRiskBreach && !config.live) {
     throw new Error("--pause-on-risk-breach requires --live");
+  }
+  if (config.maxPrePostMoveTicks <= 0) {
+    throw new Error("MARKET_MAKER_MAX_PRE_POST_MOVE_TICKS must be greater than zero");
   }
   if (config.maxDataAgeSecs <= 0) {
     throw new Error("MARKET_MAKER_MAX_DATA_AGE_SECS must be greater than zero");

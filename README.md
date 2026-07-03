@@ -76,6 +76,26 @@ If a sell order returns `position balance 0 below required 5000000`, the wallet
 has zero balance for that outcome token and the order size is 5 shares
 (`5 * 10^6` base units).
 
+To cancel all open orders in the currently configured market scope and exit:
+
+```bash
+pnpm run start -- --live --cancel-all
+```
+
+To cancel scoped open orders when the process is interrupted, for example by
+Ctrl-C or SIGTERM:
+
+```bash
+pnpm run start -- --live --cancel-all-on-exit --cycles 1000
+```
+
+Both cancel modes are live-only. With `--event-slug`, `--cancel-all` discovers
+the selected event's markets at startup, cancels their open orders, and exits.
+Without `--event-slug`, it targets the normal discovery selection.
+`--cancel-all-on-exit` uses the latest non-empty market scope managed while the
+bot was running, so a transient empty discovery cycle does not clear the
+emergency cancel target.
+
 Live mode also checks open orders and balances before posting. It subtracts
 collateral already locked by live buy orders, checks sell orders against
 available outcome-token balance, respects configured collateral caps, and
@@ -214,6 +234,18 @@ top-of-book depth before quoting.
   Default: true.
   Cancels your existing orders for the token before posting fresh quotes.
   Necessary to avoid stacking duplicate stale orders on the same token.
+
+  --cancel-all / MARKET_MAKER_CANCEL_ALL
+  Default: false.
+  Live-only one-shot command. Discovers the configured market scope, cancels
+  open orders for its outcome tokens, waits briefly for them to clear, then
+  exits. Necessary for emergency cleanup without posting new quotes.
+
+  --cancel-all-on-exit / MARKET_MAKER_CANCEL_ALL_ON_EXIT
+  Default: false.
+  Live-only shutdown guard. On Ctrl-C or SIGTERM, cancels open orders for the
+  markets currently managed by this process and verifies whether any remain.
+  Necessary when you do not want interrupted runs to leave stale GTC orders.
 
   --post-only / MARKET_MAKER_POST_ONLY
   Default: true.

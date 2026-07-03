@@ -29,6 +29,8 @@ export interface Config {
   allowSingleSided: boolean;
   respectRewardMinSize: boolean;
   cancelBeforeQuote: boolean;
+  cancelAll: boolean;
+  cancelAllOnExit: boolean;
   postOnly: boolean;
   requireTwoSidedLive: boolean;
   minPrice: number;
@@ -71,6 +73,8 @@ Options:
   --allow-single-sided              MARKET_MAKER_ALLOW_SINGLE_SIDED, default true
   --respect-reward-min-size         MARKET_MAKER_RESPECT_REWARD_MIN_SIZE, default false
   --cancel-before-quote             MARKET_MAKER_CANCEL_BEFORE_QUOTE, default true
+  --cancel-all                      MARKET_MAKER_CANCEL_ALL, default false
+  --cancel-all-on-exit              MARKET_MAKER_CANCEL_ALL_ON_EXIT, default false
   --post-only                       MARKET_MAKER_POST_ONLY, default true
   --require-two-sided-live          MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE, default true
   --min-price <n>                   MARKET_MAKER_MIN_PRICE, default 0.05
@@ -113,6 +117,8 @@ const knownOptions = new Set([
   "allow-single-sided",
   "respect-reward-min-size",
   "cancel-before-quote",
+  "cancel-all",
+  "cancel-all-on-exit",
   "post-only",
   "require-two-sided-live",
   "min-price",
@@ -265,6 +271,20 @@ export function parseConfig(
       "cancel-before-quote",
       "MARKET_MAKER_CANCEL_BEFORE_QUOTE",
       true,
+    ),
+    cancelAll: booleanArg(
+      args,
+      env,
+      "cancel-all",
+      "MARKET_MAKER_CANCEL_ALL",
+      false,
+    ),
+    cancelAllOnExit: booleanArg(
+      args,
+      env,
+      "cancel-all-on-exit",
+      "MARKET_MAKER_CANCEL_ALL_ON_EXIT",
+      false,
     ),
     postOnly: booleanArg(
       args,
@@ -590,6 +610,14 @@ function validateConfig(config: Config): void {
   }
   if (config.cycles <= 0) {
     throw new Error("MARKET_MAKER_CYCLES must be greater than zero");
+  }
+  if (config.cancelAll && config.cancelAllOnExit) {
+    throw new Error(
+      "MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT are mutually exclusive",
+    );
+  }
+  if ((config.cancelAll || config.cancelAllOnExit) && !config.live) {
+    throw new Error("MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT require --live");
   }
   if (!config.live) {
     return;

@@ -18,6 +18,8 @@ describe("config", () => {
         expect(config.maxTotalCollateral).toBe(50);
         expect(config.minFreeCollateral).toBe(1);
         expect(config.maxOpenOrdersPerToken).toBe(2);
+        expect(config.cancelAll).toBe(false);
+        expect(config.cancelAllOnExit).toBe(false);
     });
 
     it("rejects empty event slug", () => {
@@ -91,6 +93,20 @@ describe("config", () => {
     it("rejects fractional open order limit", () => {
         expect(() => parseConfig(["--max-open-orders-per-token", "1.5"], {})).toThrow(
             "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN must be a positive integer",
+        );
+    });
+
+    it("rejects cancel-all without live mode", () => {
+        expect(() => parseConfig(["--cancel-all"], {})).toThrow(
+            "MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT require --live",
+        );
+    });
+
+    it("rejects mutually exclusive cancel modes", () => {
+        expect(() =>
+            parseConfig(["--cancel-all", "--cancel-all-on-exit"], {}),
+        ).toThrow(
+            "MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT are mutually exclusive",
         );
     });
 });

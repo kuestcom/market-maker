@@ -38,6 +38,8 @@ export interface Config {
   maxPrice: number;
   maxCollateralPerMarket: number;
   maxLossPerMarket: number;
+  maxInventoryPerToken: number;
+  maxInventoryPerMarket: number;
   maxTotalCollateral: number;
   minFreeCollateral: number;
   maxOpenOrdersPerToken: number;
@@ -83,6 +85,8 @@ Options:
   --max-price <n>                   MARKET_MAKER_MAX_PRICE, default 0.95
   --max-collateral-per-market <n>   MARKET_MAKER_MAX_COLLATERAL_PER_MARKET, default 25
   --max-loss-per-market <n>         MARKET_MAKER_MAX_LOSS_PER_MARKET, default 25
+  --max-inventory-per-token <n>     MARKET_MAKER_MAX_INVENTORY_PER_TOKEN, default 25
+  --max-inventory-per-market <n>    MARKET_MAKER_MAX_INVENTORY_PER_MARKET, default 50
   --max-total-collateral <n>        MARKET_MAKER_MAX_TOTAL_COLLATERAL, default 50
   --min-free-collateral <n>         MARKET_MAKER_MIN_FREE_COLLATERAL, default 1
   --max-open-orders-per-token <n>   MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN, default 2
@@ -128,6 +132,8 @@ const knownOptions = new Set([
   "max-price",
   "max-collateral-per-market",
   "max-loss-per-market",
+  "max-inventory-per-token",
+  "max-inventory-per-market",
   "max-total-collateral",
   "min-free-collateral",
   "max-open-orders-per-token",
@@ -325,6 +331,20 @@ export function parseConfig(
       "max-loss-per-market",
       "MARKET_MAKER_MAX_LOSS_PER_MARKET",
       25,
+    ),
+    maxInventoryPerToken: numberArg(
+      args,
+      env,
+      "max-inventory-per-token",
+      "MARKET_MAKER_MAX_INVENTORY_PER_TOKEN",
+      25,
+    ),
+    maxInventoryPerMarket: numberArg(
+      args,
+      env,
+      "max-inventory-per-market",
+      "MARKET_MAKER_MAX_INVENTORY_PER_MARKET",
+      50,
     ),
     maxTotalCollateral: numberArg(
       args,
@@ -603,6 +623,12 @@ function validateConfig(config: Config): void {
   }
   if (config.maxLossPerMarket <= 0) {
     throw new Error("MARKET_MAKER_MAX_LOSS_PER_MARKET must be greater than zero");
+  }
+  if (config.maxInventoryPerToken <= 0) {
+    throw new Error("MARKET_MAKER_MAX_INVENTORY_PER_TOKEN must be greater than zero");
+  }
+  if (config.maxInventoryPerMarket <= 0) {
+    throw new Error("MARKET_MAKER_MAX_INVENTORY_PER_MARKET must be greater than zero");
   }
   if (config.maxTotalCollateral <= 0) {
     throw new Error("MARKET_MAKER_MAX_TOTAL_COLLATERAL must be greater than zero");

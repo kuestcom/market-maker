@@ -63,6 +63,7 @@ export interface QuoteBand {
   price: number;
   minPrice: number;
   maxPrice: number;
+  minimumSize: number;
   minSize: number;
   avgSize: number;
   maxSize: number;
@@ -151,6 +152,51 @@ class LiveMarketState {
     return exposure.worstLoss();
   }
 
+  inventoryBuyRoom(
+    tokenId: string,
+    stagedOrders: ProposedOrder[],
+    config: Config,
+  ): InventoryBuyRoom {
+    const tokenPosition = this.longInventoryForToken(tokenId, stagedOrders);
+    const marketInventory = this.longMarketInventory(stagedOrders);
+    const tokenRoom = Math.max(config.maxInventoryPerToken - tokenPosition, 0);
+    const marketRoom = Math.max(config.maxInventoryPerMarket - marketInventory, 0);
+    return {
+      tokenPosition,
+      marketInventory,
+      room: Math.min(tokenRoom, marketRoom),
+    };
+  }
+
+  longInventoryForToken(tokenId: string, stagedOrders: ProposedOrder[]): number {
+    const token = this.stateForToken(tokenId);
+    if (!token) {
+      return 0;
+    }
+    return tokenLongInventory(
+      token.balance,
+      token.openOrders,
+      this.pendingOrders,
+      stagedOrders,
+      tokenId,
+    );
+  }
+
+  longMarketInventory(stagedOrders: ProposedOrder[]): number {
+    return this.tokens.reduce(
+      (total, token) =>
+        total +
+        tokenLongInventory(
+          token.balance,
+          token.openOrders,
+          this.pendingOrders,
+          stagedOrders,
+          token.tokenId,
+        ),
+      0,
+    );
+  }
+
   private exposure(): MarketExposure {
     const exposure = new MarketExposure(
       this.tokens.map((token) => ({
@@ -205,6 +251,12 @@ interface SubmittedOrder {
   proposedOrder: ProposedOrder;
   order: Awaited<ReturnType<ClobClient["createOrder"]>>;
   collateral: number;
+}
+
+interface InventoryBuyRoom {
+  tokenPosition: number;
+  marketInventory: number;
+  room: number;
 }
 
 interface OutcomeExposure {
@@ -887,6 +939,7 @@ function buildQuoteBand(
     price,
     minPrice,
     maxPrice,
+    minimumSize: orderSize(market, 0, config),
     minSize: orderSize(market, minSize, config),
     avgSize: orderSize(market, avgSize, config),
     maxSize: orderSize(market, maxSize, config),
@@ -1005,7 +1058,7 @@ function formatBand(band: QuoteBand | undefined): string {
   }
   return (
     `price=${band.price} band=[${band.minPrice}, ${band.maxPrice}] ` +
-    `size=${band.minSize}/${band.avgSize}/${band.maxSize}`
+    `size=${band.minimumSize}/${band.minSize}/${band.avgSize}/${band.maxSize}`
   );
 }
 
@@ -1097,47 +1150,69 @@ async function reconcileQuotePlan(
       const openSize = bandOpenSize(remainingOrders, plan.buyBand);
       const missingSize = bandMissingSize(plan.buyBand, openSize);
       if (missingSize !== undefined) {
-        const decision = buyTopUpDecision(
+        const stagedOrders = plannedOrders.map((order) => order.proposedOrder);
+        const inventoryRoom = marketState.inventoryBuyRoom(plan.tokenId, stagedOrders, config);
+        const adjustedSize = inventoryAdjustedBuySize(
           missingSize,
-          plan.buyBand.price,
-          freeCollateral,
-          globalBudget,
-          marketBudget,
+          plan.buyBand.minimumSize,
+          inventoryRoom.room,
         );
-        if (decision.kind === "place") {
-          const proposedOrder = {
-            tokenId: plan.tokenId,
-            side: Side.BUY,
-            price: plan.buyBand.price,
-            size: decision.size,
-          };
-          const stagedOrders = plannedOrders.map((order) => order.proposedOrder);
-          if (!marketLossExceedsCap(plan, proposedOrder, marketState, config, stagedOrders)) {
-            if (isShutdownRequested(shutdown)) {
-              return;
-            }
-            const order = await client.createOrder({
-              tokenID: plan.tokenId,
-              price: plan.buyBand.price,
-              size: decision.size,
-              side: Side.BUY,
-            });
-            if (isShutdownRequested(shutdown)) {
-              return;
-            }
-            plannedOrders.push({
-              side: Side.BUY,
-              proposedOrder,
-              order,
-              collateral: decision.collateral,
-            });
-            newOrderSlots -= 1;
-          }
-        } else {
+        if (adjustedSize === undefined) {
           console.log(
             `skip ${plan.marketSlug} ${plan.outcome} buy: ` +
-              `risk budget/free collateral leaves size ${decision.affordableSize} below band target ${missingSize}`,
+              `inventory room ${inventoryRoom.room} below minimum order size ${plan.buyBand.minimumSize} ` +
+              `(token position ${inventoryRoom.tokenPosition}, ` +
+              `market inventory ${inventoryRoom.marketInventory})`,
           );
+        } else {
+          if (adjustedSize < missingSize) {
+            console.log(
+              `cap ${plan.marketSlug} ${plan.outcome} buy size from ${missingSize} to ${adjustedSize}: ` +
+                `token position ${inventoryRoom.tokenPosition} / max ${config.maxInventoryPerToken}, ` +
+                `market inventory ${inventoryRoom.marketInventory} / max ${config.maxInventoryPerMarket}`,
+            );
+          }
+          const decision = buyTopUpDecision(
+            adjustedSize,
+            plan.buyBand.price,
+            freeCollateral,
+            globalBudget,
+            marketBudget,
+          );
+          if (decision.kind === "place") {
+            const proposedOrder = {
+              tokenId: plan.tokenId,
+              side: Side.BUY,
+              price: plan.buyBand.price,
+              size: decision.size,
+            };
+            if (!marketLossExceedsCap(plan, proposedOrder, marketState, config, stagedOrders)) {
+              if (isShutdownRequested(shutdown)) {
+                return;
+              }
+              const order = await client.createOrder({
+                tokenID: plan.tokenId,
+                price: plan.buyBand.price,
+                size: decision.size,
+                side: Side.BUY,
+              });
+              if (isShutdownRequested(shutdown)) {
+                return;
+              }
+              plannedOrders.push({
+                side: Side.BUY,
+                proposedOrder,
+                order,
+                collateral: decision.collateral,
+              });
+              newOrderSlots -= 1;
+            }
+          } else {
+            console.log(
+              `skip ${plan.marketSlug} ${plan.outcome} buy: ` +
+                `risk budget/free collateral leaves size ${decision.affordableSize} below band target ${adjustedSize}`,
+            );
+          }
         }
       }
     }
@@ -1730,6 +1805,49 @@ export function bandMissingSize(
   openSize: number,
 ): number | undefined {
   return openSize < band.minSize ? Math.max(band.avgSize - openSize, 0) : undefined;
+}
+
+export function inventoryAdjustedBuySize(
+  requestedSize: number,
+  minimumSize: number,
+  inventoryRoom: number,
+): number | undefined {
+  const size = Math.min(requestedSize, inventoryRoom);
+  if (size <= 0 || size < minimumSize) {
+    return undefined;
+  }
+  return size;
+}
+
+export function tokenLongInventory(
+  balance: number,
+  openOrders: OpenOrder[],
+  pendingOrders: ProposedOrder[],
+  stagedOrders: ProposedOrder[],
+  tokenId: string,
+): number {
+  return (
+    Math.max(balance, 0) +
+    buyOrderSizeForToken(openOrders, tokenId) +
+    pendingBuySizeForToken(pendingOrders, tokenId) +
+    pendingBuySizeForToken(stagedOrders, tokenId)
+  );
+}
+
+function buyOrderSizeForToken(orders: OpenOrder[], tokenId: string): number {
+  return orders
+    .filter(
+      (order) =>
+        (order.asset_id || "") === tokenId &&
+        order.side === Side.BUY,
+    )
+    .reduce((total, order) => total + openOrderRemainingSize(order), 0);
+}
+
+function pendingBuySizeForToken(orders: ProposedOrder[], tokenId: string): number {
+  return orders
+    .filter((order) => order.tokenId === tokenId && order.side === Side.BUY)
+    .reduce((total, order) => total + order.size, 0);
 }
 
 function openOrderRemainingSize(order: OpenOrder): number {

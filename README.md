@@ -100,6 +100,8 @@ Live mode also checks open orders and balances before posting. It subtracts
 collateral already locked by live buy orders, checks sell orders against
 available outcome-token balance, respects configured collateral caps, and
 blocks quotes whose simulated fill would exceed the configured market loss cap.
+Buy-side sizing is inventory-aware: token balances, live open buys, and pending
+buys are counted before adding more long exposure to an outcome or market.
 By default, it also requires a two-sided book with acceptable spread and
 top-of-book depth before quoting.
 
@@ -282,6 +284,18 @@ top-of-book depth before quoting.
   open orders, and the proposed new order are counted. Necessary because
   collateral caps alone do not account for cross-outcome inventory. Existing
   balances are marked at current fair value because fill history is not tracked.
+
+  --max-inventory-per-token / MARKET_MAKER_MAX_INVENTORY_PER_TOKEN
+  Default: 25.
+  Maximum long outcome-token inventory allowed after balances, live open
+  orders, and pending orders are counted. Buy orders are capped or skipped when
+  this limit leaves too little room.
+
+  --max-inventory-per-market / MARKET_MAKER_MAX_INVENTORY_PER_MARKET
+  Default: 50.
+  Maximum total long inventory across a market's outcome tokens. Necessary to
+  stop the bot from accumulating too many shares in one market even when each
+  individual token is under its own cap.
 
   --max-total-collateral / MARKET_MAKER_MAX_TOTAL_COLLATERAL
   Default: 50.

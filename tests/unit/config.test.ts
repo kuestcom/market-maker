@@ -15,6 +15,8 @@ describe("config", () => {
         expect(config.minTopDepth).toBe(5);
         expect(config.maxCollateralPerMarket).toBe(25);
         expect(config.maxLossPerMarket).toBe(25);
+        expect(config.maxInventoryPerToken).toBe(25);
+        expect(config.maxInventoryPerMarket).toBe(50);
         expect(config.maxTotalCollateral).toBe(50);
         expect(config.minFreeCollateral).toBe(1);
         expect(config.maxOpenOrdersPerToken).toBe(2);
@@ -50,6 +52,15 @@ describe("config", () => {
     it("rejects zero market loss limit", () => {
         expect(() => parseConfig(["--max-loss-per-market", "0"], {})).toThrow(
             "MARKET_MAKER_MAX_LOSS_PER_MARKET",
+        );
+    });
+
+    it("rejects zero inventory limits", () => {
+        expect(() => parseConfig(["--max-inventory-per-token", "0"], {})).toThrow(
+            "MARKET_MAKER_MAX_INVENTORY_PER_TOKEN",
+        );
+        expect(() => parseConfig(["--max-inventory-per-market", "0"], {})).toThrow(
+            "MARKET_MAKER_MAX_INVENTORY_PER_MARKET",
         );
     });
 

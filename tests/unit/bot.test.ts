@@ -9,10 +9,12 @@ import {
     cancelScopeOrders,
     cancellableOrders,
     isOpenOrder,
+    inventoryAdjustedBuySize,
     liquidityRejectReason,
     managedTokenIds,
     openOrderMatchesProposed,
     staleInputReason,
+    tokenLongInventory,
     type QuoteBand,
     type QuotePlan,
     selectEventCandidates,
@@ -72,6 +74,7 @@ describe("bot feature #1", () => {
             price: 0.47,
             minPrice: 0.46,
             maxPrice: 0.48,
+            minimumSize: 0,
             minSize: 3,
             avgSize: 7,
             maxSize: 9,
@@ -81,6 +84,7 @@ describe("bot feature #1", () => {
             price: 0.53,
             minPrice: 0.52,
             maxPrice: 0.54,
+            minimumSize: 0,
             minSize: 3,
             avgSize: 7,
             maxSize: 9,
@@ -164,6 +168,35 @@ describe("bot feature #1", () => {
         expect(bandMissingSize(band, 4)).toBe(6);
         expect(bandMissingSize(band, 5)).toBeUndefined();
         expect(bandMissingSize(band, 9)).toBeUndefined();
+    });
+
+    it("caps buy size by inventory room while respecting minimum order size", () => {
+        expect(inventoryAdjustedBuySize(10, 1, 4)).toBe(4);
+        expect(inventoryAdjustedBuySize(10, 5, 4)).toBeUndefined();
+    });
+
+    it("counts long inventory from balances, open buys, pending buys, and staged buys", () => {
+        expect(
+            tokenLongInventory(
+                2,
+                [openOrder("open-buy", Side.BUY, "0.49", "3", 1), openOrder("sell", Side.SELL, "0.51", "7", 2)],
+                [{ tokenId: "yes", side: Side.BUY, price: 0.48, size: 4 }],
+                [{ tokenId: "yes", side: Side.BUY, price: 0.47, size: 5 }],
+                "yes",
+            ),
+        ).toBe(14);
+    });
+
+    it("does not count open buys with missing token id toward every token inventory", () => {
+        expect(
+            tokenLongInventory(
+                0,
+                [openOrder("missing-token", Side.BUY, "0.49", "3", 1, "OPEN", "0", "")],
+                [],
+                [],
+                "yes",
+            ),
+        ).toBe(0);
     });
 
     it("checks prices against inclusive quote band bounds", () => {
@@ -326,6 +359,8 @@ function config(): Config {
         maxPrice: 0.95,
         maxCollateralPerMarket: 25,
         maxLossPerMarket: 25,
+        maxInventoryPerToken: 25,
+        maxInventoryPerMarket: 50,
         maxTotalCollateral: 50,
         minFreeCollateral: 1,
         maxOpenOrdersPerToken: 2,
@@ -384,6 +419,7 @@ function quoteBand(): QuoteBand {
         price: 0.49,
         minPrice: 0.47,
         maxPrice: 0.49,
+        minimumSize: 1,
         minSize: 5,
         avgSize: 10,
         maxSize: 15,
@@ -398,6 +434,7 @@ function openOrder(
     createdAt: number,
     status = "OPEN",
     sizeMatched = "0",
+    assetId = "yes",
 ): OpenOrder {
     return {
         id,
@@ -405,7 +442,7 @@ function openOrder(
         owner: "owner",
         maker_address: "maker",
         market: "market",
-        asset_id: "yes",
+        asset_id: assetId,
         side,
         original_size: size,
         size_matched: sizeMatched,

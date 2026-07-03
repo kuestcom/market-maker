@@ -11,6 +11,7 @@ import {
     isOpenOrder,
     liquidityRejectReason,
     managedTokenIds,
+    openOrderMatchesProposed,
     type QuoteBand,
     type QuotePlan,
     selectEventCandidates,
@@ -176,6 +177,15 @@ describe("bot feature #1", () => {
 
     it("keeps documented OPEN status in reconciliation", () => {
         expect(isOpenOrder(openOrder("open", Side.BUY, "0.49", "1", 1, "OPEN"))).toBe(true);
+    });
+
+    it("matches accepted open orders to proposed pending orders after partial fills", () => {
+        expect(
+            openOrderMatchesProposed(
+                openOrder("partial", Side.BUY, "0.49", "5", 1, "OPEN", "2"),
+                { tokenId: "yes", side: Side.BUY, price: 0.49, size: 5 },
+            ),
+        ).toBe(true);
     });
 
     it("collects unique managed token ids in market order", () => {
@@ -377,6 +387,7 @@ function openOrder(
     size: string,
     createdAt: number,
     status = "OPEN",
+    sizeMatched = "0",
 ): OpenOrder {
     return {
         id,
@@ -387,7 +398,7 @@ function openOrder(
         asset_id: "yes",
         side,
         original_size: size,
-        size_matched: "0",
+        size_matched: sizeMatched,
         price,
         associate_trades: [],
         outcome: "Yes",

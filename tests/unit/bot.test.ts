@@ -13,10 +13,12 @@ import {
     liquidityRejectReason,
     managedTokenIds,
     openOrderMatchesProposed,
+    riskBreachAppliesToToken,
     staleInputReason,
     tokenLongInventory,
     type QuoteBand,
     type QuotePlan,
+    type RiskBreach,
     selectEventCandidates,
 } from "../../src/bot.js";
 import type { Config } from "../../src/config.js";
@@ -352,6 +354,7 @@ function config(): Config {
         cancelBeforeQuote: true,
         cancelAll: false,
         cancelAllOnExit: false,
+        cancelOnRiskBreach: false,
         postOnly: true,
         requireTwoSidedLive: true,
         maxDataAgeSecs: 10,
@@ -395,6 +398,33 @@ describe("market loss guard", () => {
         });
 
         expect(exposure.worstLoss()).toBe(2);
+    });
+
+    it("counts buy collateral from outcome costs", () => {
+        const exposure = new MarketExposure([
+            { tokenId: "yes", position: 2, cost: 0.8, proceeds: 0 },
+            { tokenId: "no", position: 3, cost: 1.2, proceeds: 0 },
+        ]);
+
+        expect(exposure.buyCollateral()).toBe(2);
+    });
+
+    it("applies token inventory breaches only to their token", () => {
+        const breaches: RiskBreach[] = [
+            { kind: "tokenInventory", tokenId: "yes", value: 26, limit: 25 },
+        ];
+
+        expect(riskBreachAppliesToToken(breaches, "yes")).toBe(true);
+        expect(riskBreachAppliesToToken(breaches, "no")).toBe(false);
+    });
+
+    it("applies market-level risk breaches to every token", () => {
+        const breaches: RiskBreach[] = [
+            { kind: "marketLoss", value: 26, limit: 25 },
+        ];
+
+        expect(riskBreachAppliesToToken(breaches, "yes")).toBe(true);
+        expect(riskBreachAppliesToToken(breaches, "no")).toBe(true);
     });
 });
 

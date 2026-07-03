@@ -102,6 +102,28 @@ describe("bot feature #1", () => {
         expect(marketBudget.remainingCollateral()).toBe(10);
     });
 
+    it("releases reserved open-buy collateral when an order is no longer open", () => {
+        const budget = new RiskBudget(10);
+        const order = openOrder("buy", Side.BUY, "0.50", "4", 1);
+
+        budget.reserveOpenBuyOrder(order);
+        expect(budget.remainingCollateral()).toBe(8);
+
+        budget.releaseOpenBuyOrder(order);
+        expect(budget.remainingCollateral()).toBe(10);
+    });
+
+    it("releases only the collateral amount that was reserved", () => {
+        const budget = new RiskBudget(3);
+        const order = openOrder("buy", Side.BUY, "0.50", "10", 1);
+
+        budget.reserveOpenBuyOrder(order);
+        expect(budget.remainingCollateral()).toBe(0);
+
+        budget.releaseOpenBuyOrder(order);
+        expect(budget.remainingCollateral()).toBe(3);
+    });
+
     it("trims only enough same-price size above the target", () => {
         const orders = [
             openOrder("oldest", Side.BUY, "0.49", "3", 1),

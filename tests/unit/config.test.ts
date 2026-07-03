@@ -10,6 +10,7 @@ describe("config", () => {
         expect(config.minPrice).toBe(0.05);
         expect(config.maxPrice).toBe(0.95);
         expect(config.maxCollateralPerMarket).toBe(25);
+        expect(config.maxLossPerMarket).toBe(25);
         expect(config.maxTotalCollateral).toBe(50);
         expect(config.minFreeCollateral).toBe(1);
         expect(config.maxOpenOrdersPerToken).toBe(2);
@@ -36,6 +37,12 @@ describe("config", () => {
     it("rejects zero open order limit", () => {
         expect(() => parseConfig(["--max-open-orders-per-token", "0"], {})).toThrow(
             "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN",
+        );
+    });
+
+    it("rejects zero market loss limit", () => {
+        expect(() => parseConfig(["--max-loss-per-market", "0"], {})).toThrow(
+            "MARKET_MAKER_MAX_LOSS_PER_MARKET",
         );
     });
 

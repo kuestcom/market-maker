@@ -26,6 +26,7 @@ export interface Config {
   minPrice: number;
   maxPrice: number;
   maxCollateralPerMarket: number;
+  maxLossPerMarket: number;
   maxTotalCollateral: number;
   minFreeCollateral: number;
   maxOpenOrdersPerToken: number;
@@ -59,6 +60,7 @@ Options:
   --min-price <n>                   MARKET_MAKER_MIN_PRICE, default 0.05
   --max-price <n>                   MARKET_MAKER_MAX_PRICE, default 0.95
   --max-collateral-per-market <n>   MARKET_MAKER_MAX_COLLATERAL_PER_MARKET, default 25
+  --max-loss-per-market <n>         MARKET_MAKER_MAX_LOSS_PER_MARKET, default 25
   --max-total-collateral <n>        MARKET_MAKER_MAX_TOTAL_COLLATERAL, default 50
   --min-free-collateral <n>         MARKET_MAKER_MIN_FREE_COLLATERAL, default 1
   --max-open-orders-per-token <n>   MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN, default 2
@@ -92,6 +94,7 @@ const knownOptions = new Set([
   "min-price",
   "max-price",
   "max-collateral-per-market",
+  "max-loss-per-market",
   "max-total-collateral",
   "min-free-collateral",
   "max-open-orders-per-token",
@@ -210,6 +213,13 @@ export function parseConfig(
       env,
       "max-collateral-per-market",
       "MARKET_MAKER_MAX_COLLATERAL_PER_MARKET",
+      25,
+    ),
+    maxLossPerMarket: numberArg(
+      args,
+      env,
+      "max-loss-per-market",
+      "MARKET_MAKER_MAX_LOSS_PER_MARKET",
       25,
     ),
     maxTotalCollateral: numberArg(
@@ -459,6 +469,9 @@ function validateConfig(config: Config): void {
     throw new Error(
       "MARKET_MAKER_MAX_COLLATERAL_PER_MARKET must be greater than zero",
     );
+  }
+  if (config.maxLossPerMarket <= 0) {
+    throw new Error("MARKET_MAKER_MAX_LOSS_PER_MARKET must be greater than zero");
   }
   if (config.maxTotalCollateral <= 0) {
     throw new Error("MARKET_MAKER_MAX_TOTAL_COLLATERAL must be greater than zero");

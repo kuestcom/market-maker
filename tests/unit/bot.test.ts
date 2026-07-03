@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
     RiskBudget,
+    MarketExposure,
     affordableBuySize,
     buildQuotePlan,
     cancellableOrders,
@@ -116,6 +117,7 @@ function config(): Config {
         minPrice: 0.05,
         maxPrice: 0.95,
         maxCollateralPerMarket: 25,
+        maxLossPerMarket: 25,
         maxTotalCollateral: 50,
         minFreeCollateral: 1,
         maxOpenOrdersPerToken: 2,
@@ -125,6 +127,33 @@ function config(): Config {
         statePath: "state/seen-markets.json",
     };
 }
+
+describe("market loss guard", () => {
+    it("counts complete sets as hedged", () => {
+        const exposure = new MarketExposure([
+            { tokenId: "yes", position: 5, cost: 2.5, proceeds: 0 },
+            { tokenId: "no", position: 5, cost: 2.5, proceeds: 0 },
+        ]);
+
+        expect(exposure.worstLoss()).toBe(0);
+    });
+
+    it("accounts for worst resolution payout", () => {
+        const exposure = new MarketExposure([
+            { tokenId: "yes", position: 0, cost: 0, proceeds: 0 },
+            { tokenId: "no", position: 0, cost: 0, proceeds: 0 },
+        ]);
+
+        exposure.applyOrder({
+            tokenId: "yes",
+            side: Side.BUY,
+            price: 0.4,
+            size: 5,
+        });
+
+        expect(exposure.worstLoss()).toBe(2);
+    });
+});
 
 function plan(): QuotePlan {
     return {

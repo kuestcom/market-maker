@@ -286,6 +286,13 @@ top-of-book depth before quoting.
   In live mode, skip tokens without a reliable bid and ask. Necessary because
   fallback prices like 0.5 are not safe enough for real money.
 
+  --max-pre-post-move-ticks / MARKET_MAKER_MAX_PRE_POST_MOVE_TICKS
+  Default: 2.
+  Live-mode posting guard. Immediately before posting new orders, refresh the
+  token book and skip the post if fair value moved by more than this many
+  ticks. Necessary because preflight snapshots can age before signed orders are
+  submitted.
+
   --max-data-age-secs / MARKET_MAKER_MAX_DATA_AGE_SECS
   Default: 10.
   Live-mode freshness limit for order books, open orders, token balances, and

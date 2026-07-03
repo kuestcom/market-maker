@@ -26,6 +26,7 @@ describe("config", () => {
         expect(config.pauseOnRiskBreach).toBe(false);
         expect(config.clearPause).toBe(false);
         expect(config.pausePath).toBe("state/paused.json");
+        expect(config.maxPrePostMoveTicks).toBe(2);
         expect(config.maxDataAgeSecs).toBe(10);
     });
 
@@ -168,6 +169,12 @@ describe("config", () => {
     it("rejects non-positive max data age", () => {
         expect(() => parseConfig(["--max-data-age-secs", "0"], {})).toThrow(
             "MARKET_MAKER_MAX_DATA_AGE_SECS must be greater than zero",
+        );
+    });
+
+    it("rejects zero pre-post move limit", () => {
+        expect(() => parseConfig(["--max-pre-post-move-ticks", "0"], {})).toThrow(
+            "MARKET_MAKER_MAX_PRE_POST_MOVE_TICKS must be greater than zero",
         );
     });
 });

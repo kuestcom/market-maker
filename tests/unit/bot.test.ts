@@ -6,6 +6,7 @@ import {
     buildQuotePlan,
     cancellableOrders,
     isOpenOrder,
+    liquidityRejectReason,
     type QuotePlan,
     selectEventCandidates,
 } from "../../src/bot.js";
@@ -66,6 +67,49 @@ describe("bot feature #1", () => {
     it("keeps documented OPEN status in reconciliation", () => {
         expect(isOpenOrder(openOrder("open", Side.BUY, "0.49", "1", 1, "OPEN"))).toBe(true);
     });
+
+    it("rejects missing two-sided liquidity", () => {
+        expect(
+            liquidityRejectReason([{ price: "0.49", size: "10" }], [], 0.01, 20, 5),
+        ).toEqual({ kind: "missingTwoSidedBook" });
+    });
+
+    it("rejects wide books", () => {
+        const reason = liquidityRejectReason(
+            [{ price: "0.40", size: "10" }],
+            [{ price: "0.70", size: "10" }],
+            0.01,
+            20,
+            5,
+        );
+
+        expect(reason).toMatchObject({ kind: "spreadTooWide", maxSpreadTicks: 20 });
+        expect(reason?.kind === "spreadTooWide" ? reason.spreadTicks : undefined).toBeCloseTo(30);
+    });
+
+    it("rejects shallow top depth", () => {
+        expect(
+            liquidityRejectReason(
+                [{ price: "0.49", size: "4.9" }, { price: "0.48", size: "100" }],
+                [{ price: "0.51", size: "10" }],
+                0.01,
+                20,
+                5,
+            ),
+        ).toEqual({ kind: "bidDepthTooLow", depth: 4.9, minDepth: 5 });
+    });
+
+    it("accepts tight books with enough top depth", () => {
+        expect(
+            liquidityRejectReason(
+                [{ price: "0.49", size: "2" }, { price: "0.49", size: "3" }],
+                [{ price: "0.51", size: "5" }],
+                0.01,
+                20,
+                5,
+            ),
+        ).toBeUndefined();
+    });
 });
 
 function market(slug: string): Record<string, unknown> {
@@ -108,6 +152,8 @@ function config(): Config {
         orderSize: 5,
         edgeTicks: 1,
         minSpreadTicks: 2,
+        maxBookSpreadTicks: 20,
+        minTopDepth: 5,
         quoteSides: "buy",
         allowSingleSided: true,
         respectRewardMinSize: false,

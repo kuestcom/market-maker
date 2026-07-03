@@ -57,6 +57,7 @@ interface TokenQuote {
   tokenId: string;
   fairPrice: number;
   plan?: QuotePlan;
+  skipReason?: string;
 }
 
 class LiveMarketState {
@@ -231,6 +232,13 @@ interface BuyTopUpSkip {
 }
 
 type BuyTopUpDecision = BuyTopUpPlace | BuyTopUpSkip;
+
+type LiquidityRejectReason =
+  | { kind: "missingTwoSidedBook" }
+  | { kind: "invalidTick" }
+  | { kind: "spreadTooWide"; spreadTicks: number; maxSpreadTicks: number }
+  | { kind: "bidDepthTooLow"; depth: number; minDepth: number }
+  | { kind: "askDepthTooLow"; depth: number; minDepth: number };
 
 export async function run(config: Config): Promise<void> {
   const publicClient = new ClobClient(
@@ -464,7 +472,8 @@ async function quoteMarket(
     const tokenQuote = buildTokenQuote(market, token, book, config);
     if (!tokenQuote.plan) {
       console.log(
-        `skip ${marketSlug(market)} ${tokenOutcome(token)}: no safe quote at configured edge/sides`,
+        `skip ${marketSlug(market)} ${tokenOutcome(token)}: ` +
+          `${tokenQuote.skipReason ?? "no safe quote at configured edge/sides"}`,
       );
     } else {
       printPlan(tokenQuote.plan, config.live);
@@ -498,15 +507,27 @@ function buildTokenQuote(
 ): TokenQuote {
   const bestBidPrice = bestBid(book.bids ?? []);
   const bestAskPrice = bestAsk(book.asks ?? []);
+  const fair = fairPrice(
+    bestBidPrice,
+    bestAskPrice,
+    numberOrDefault(field(token, "price", "p"), 0),
+    numberOrUndefined(book.last_trade_price),
+  );
+  const liquiditySkip = shouldEnforceLiquidityQuality(config)
+    ? liquidityQualityRejectReason(book, config)
+    : undefined;
+  const plan = liquiditySkip
+    ? undefined
+    : buildQuotePlan(market, token, book, config);
   return {
     tokenId: tokenIdFromToken(token),
-    fairPrice: fairPrice(
-      bestBidPrice,
-      bestAskPrice,
-      numberOrDefault(field(token, "price", "p"), 0),
-      numberOrUndefined(book.last_trade_price),
-    ),
-    plan: buildQuotePlan(market, token, book, config),
+    fairPrice: fair,
+    plan,
+    skipReason: plan
+      ? undefined
+      : liquiditySkip
+        ? `liquidity quality check failed: ${liquidityRejectMessage(liquiditySkip)}`
+        : "no safe quote at configured edge/sides",
   };
 }
 
@@ -608,6 +629,85 @@ export function orderSize(market: Market, config: Config): number {
 
 function priceInConfiguredRange(price: number, config: Config): boolean {
   return price >= config.minPrice && price <= config.maxPrice;
+}
+
+function shouldEnforceLiquidityQuality(config: Config): boolean {
+  return config.live && config.requireTwoSidedLive;
+}
+
+function liquidityQualityRejectReason(
+  book: OrderBookSummary,
+  config: Config,
+): LiquidityRejectReason | undefined {
+  return liquidityRejectReason(
+    book.bids ?? [],
+    book.asks ?? [],
+    numberOrDefault(book.tick_size, 0),
+    config.maxBookSpreadTicks,
+    config.minTopDepth,
+  );
+}
+
+export function liquidityRejectReason(
+  bids: OrderSummary[],
+  asks: OrderSummary[],
+  tick: number,
+  maxSpreadTicks: number,
+  minTopDepth: number,
+): LiquidityRejectReason | undefined {
+  if (tick <= 0) {
+    return { kind: "invalidTick" };
+  }
+
+  const bid = bestBid(bids);
+  const ask = bestAsk(asks);
+  if (
+    bid === undefined ||
+    ask === undefined ||
+    bid <= 0 ||
+    ask <= bid
+  ) {
+    return { kind: "missingTwoSidedBook" };
+  }
+
+  const spreadTicks = (ask - bid) / tick;
+  if (spreadTicks > maxSpreadTicks) {
+    return { kind: "spreadTooWide", spreadTicks, maxSpreadTicks };
+  }
+
+  const bidDepth = topDepth(bids, bid);
+  if (bidDepth < minTopDepth) {
+    return { kind: "bidDepthTooLow", depth: bidDepth, minDepth: minTopDepth };
+  }
+
+  const askDepth = topDepth(asks, ask);
+  if (askDepth < minTopDepth) {
+    return { kind: "askDepthTooLow", depth: askDepth, minDepth: minTopDepth };
+  }
+
+  return undefined;
+}
+
+function topDepth(levels: OrderSummary[], price: number): number {
+  return levels
+    .filter((level) => numberOrDefault(level.price, 0) === price)
+    .reduce((total, level) => total + numberOrDefault(level.size, 0), 0);
+}
+
+function liquidityRejectMessage(reason: LiquidityRejectReason): string {
+  if (reason.kind === "missingTwoSidedBook") {
+    return "missing a valid two-sided book";
+  }
+  if (reason.kind === "invalidTick") {
+    return "book tick size is invalid";
+  }
+  if (reason.kind === "spreadTooWide") {
+    return `spread is ${reason.spreadTicks} ticks above max ${reason.maxSpreadTicks}`;
+  }
+  if (reason.kind === "bidDepthTooLow") {
+    return `best bid depth ${reason.depth} below minimum ${reason.minDepth}`;
+  }
+  return `best ask depth ${reason.depth} below minimum ${reason.minDepth}`;
 }
 
 function printPlan(plan: QuotePlan, live: boolean): void {

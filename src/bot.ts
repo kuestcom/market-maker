@@ -35,6 +35,9 @@ import {
 type Market = Record<string, unknown>;
 type Token = Record<string, unknown>;
 const CONDITIONAL_TOKEN_BASE_UNITS = 1_000_000;
+const CANCEL_ORDER_BATCH_SIZE = 50;
+const CANCEL_VERIFY_ATTEMPTS = 5;
+const CANCEL_VERIFY_DELAY_SECS = 2;
 
 interface MarketCandidate {
   market: Market;
@@ -69,6 +72,11 @@ interface TokenQuote {
   fairPrice: number;
   plan?: QuotePlan;
   skipReason?: string;
+}
+
+interface ShutdownState {
+  requestedSignal?: NodeJS.Signals;
+  abortController?: AbortController;
 }
 
 class LiveMarketState {
@@ -251,15 +259,108 @@ type LiquidityRejectReason =
   | { kind: "bidDepthTooLow"; depth: number; minDepth: number }
   | { kind: "askDepthTooLow"; depth: number; minDepth: number };
 
+interface CancelOpenOrdersSummary {
+  marketsChecked: number;
+  tokensChecked: number;
+  ordersFound: number;
+  canceled: number;
+  notCanceled: number;
+  remainingOpen: number;
+}
+
 export async function run(config: Config): Promise<void> {
   const publicClient = new ClobClient(
     config.clobHost,
     (config.chainId ?? Chain.AMOY) as Chain,
   );
   const liveClient = config.live ? await authenticate(config) : undefined;
+
+  if (config.cancelAll) {
+    await cancelScopeOrders(publicClient, requireLiveClient(liveClient), config);
+    return;
+  }
+
+  if (config.cancelAllOnExit) {
+    await runWithCancelOnExit(publicClient, requireLiveClient(liveClient), config);
+    return;
+  }
+
+  await runCycles(publicClient, liveClient, config);
+}
+
+function requireLiveClient(liveClient: ClobClient | undefined): ClobClient {
+  if (!liveClient) {
+    throw new Error("cancel-all requires a live authenticated client");
+  }
+  return liveClient;
+}
+
+async function runWithCancelOnExit(
+  publicClient: ClobClient,
+  liveClient: ClobClient,
+  config: Config,
+): Promise<void> {
+  const managedScope: Market[] = [];
+  const shutdown: ShutdownState = { abortController: new AbortController() };
+  let cancelTask: Promise<void> | undefined;
+  const cancelScopedOrders = async (): Promise<void> => {
+    try {
+      await cancelScopeOrders(publicClient, liveClient, config, managedScope);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+    }
+  };
+  const requestShutdown = (signal: NodeJS.Signals): void => {
+    if (shutdown.requestedSignal) {
+      return;
+    }
+    shutdown.requestedSignal = signal;
+    shutdown.abortController?.abort();
+    console.log(`shutdown requested: received ${signal}; stopping quote loop before canceling scoped open orders`);
+    cancelTask = cancelScopedOrders();
+  };
+
+  process.once("SIGINT", requestShutdown);
+  process.once("SIGTERM", requestShutdown);
+  let cycleError: unknown;
+  try {
+    await runCycles(publicClient, liveClient, config, managedScope, shutdown);
+  } catch (error) {
+    cycleError = error;
+  } finally {
+    process.off("SIGINT", requestShutdown);
+    process.off("SIGTERM", requestShutdown);
+  }
+
+  if (shutdown.requestedSignal) {
+    await cancelTask;
+    await cancelScopedOrders();
+    process.exitCode = signalExitCode(shutdown.requestedSignal);
+    return;
+  }
+
+  if (cycleError !== undefined) {
+    throw cycleError;
+  }
+}
+
+function signalExitCode(signal: NodeJS.Signals): number {
+  return signal === "SIGTERM" ? 143 : 130;
+}
+
+async function runCycles(
+  publicClient: ClobClient,
+  liveClient: ClobClient | undefined,
+  config: Config,
+  managedScope?: Market[],
+  shutdown?: ShutdownState,
+): Promise<void> {
   const seen = await loadSeenMarkets(config.statePath);
 
   for (let cycle = 1; cycle <= config.cycles; cycle += 1) {
+    if (isShutdownRequested(shutdown)) {
+      return;
+    }
     const eventSlug = config.eventSlug?.trim();
     let candidates: MarketCandidate[];
     if (eventSlug) {
@@ -284,6 +385,9 @@ export async function run(config: Config): Promise<void> {
         `found ${candidates.length} tradable fork-scoped markets (${newCount} new)`,
       );
     }
+    if (managedScope) {
+      replaceManagedScope(managedScope, candidates);
+    }
 
     for (const candidate of candidates) {
       const marker = candidate.isNew ? "new" : "seen";
@@ -298,13 +402,61 @@ export async function run(config: Config): Promise<void> {
 
     const riskBudget = new RiskBudget(config.maxTotalCollateral);
     for (const candidate of candidates) {
-      await quoteMarket(publicClient, liveClient, candidate.market, config, riskBudget);
+      if (isShutdownRequested(shutdown)) {
+        return;
+      }
+      await quoteMarket(
+        publicClient,
+        liveClient,
+        candidate.market,
+        config,
+        riskBudget,
+        shutdown,
+      );
     }
 
     if (cycle < config.cycles) {
-      await sleep(config.refreshSecs * 1000);
+      if (isShutdownRequested(shutdown)) {
+        return;
+      }
+      await interruptibleSleep(config.refreshSecs * 1000, shutdown);
     }
   }
+}
+
+function isShutdownRequested(shutdown: ShutdownState | undefined): boolean {
+  return shutdown?.requestedSignal !== undefined;
+}
+
+async function interruptibleSleep(
+  milliseconds: number,
+  shutdown: ShutdownState | undefined,
+): Promise<void> {
+  if (!shutdown?.abortController) {
+    await sleep(milliseconds);
+    return;
+  }
+  try {
+    await sleep(milliseconds, undefined, { signal: shutdown.abortController.signal });
+  } catch (error) {
+    if (!isAbortError(error)) {
+      throw error;
+    }
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function replaceManagedScope(
+  managedScope: Market[],
+  candidates: MarketCandidate[],
+): void {
+  if (candidates.length === 0) {
+    return;
+  }
+  managedScope.splice(0, managedScope.length, ...candidates.map((candidate) => candidate.market));
 }
 
 async function authenticate(config: Config): Promise<ClobClient> {
@@ -470,16 +622,23 @@ async function quoteMarket(
   market: Market,
   config: Config,
   globalBudget: RiskBudget,
+  shutdown?: ShutdownState,
 ): Promise<void> {
   const marketBudget = new RiskBudget(config.maxCollateralPerMarket);
   const tokenQuotes: TokenQuote[] = [];
   for (const token of marketTokens(market)) {
+    if (isShutdownRequested(shutdown)) {
+      return;
+    }
     const tokenId = tokenIdFromToken(token);
     if (!tokenId) {
       continue;
     }
 
     const book = await publicClient.getOrderBook(tokenId);
+    if (isShutdownRequested(shutdown)) {
+      return;
+    }
     const tokenQuote = buildTokenQuote(market, token, book, config);
     if (!tokenQuote.plan) {
       console.log(
@@ -493,9 +652,15 @@ async function quoteMarket(
     tokenQuotes.push(tokenQuote);
   }
 
+  if (isShutdownRequested(shutdown)) {
+    return;
+  }
   if (liveClient) {
     const marketState = await LiveMarketState.load(liveClient, tokenQuotes);
     for (const tokenQuote of tokenQuotes) {
+      if (isShutdownRequested(shutdown)) {
+        return;
+      }
       if (tokenQuote.plan) {
         await reconcileQuotePlan(
           liveClient,
@@ -504,6 +669,7 @@ async function quoteMarket(
           globalBudget,
           marketBudget,
           marketState,
+          shutdown,
         );
       }
     }
@@ -803,7 +969,11 @@ async function reconcileQuotePlan(
   globalBudget: RiskBudget,
   marketBudget: RiskBudget,
   marketState: LiveMarketState,
+  shutdown?: ShutdownState,
 ): Promise<void> {
+  if (isShutdownRequested(shutdown)) {
+    return;
+  }
   const openOrders = marketState.openOrders(plan.tokenId);
   const ordersToCancel = cancellableOrders(openOrders, plan, config);
   if (config.cancelBeforeQuote && ordersToCancel.length > 0) {
@@ -821,6 +991,9 @@ async function reconcileQuotePlan(
     }
   }
 
+  if (isShutdownRequested(shutdown)) {
+    return;
+  }
   const canceledIds = new Set(ordersToCancel.map((order) => order.id));
   const remainingOrders = openOrders.filter((order) => !canceledIds.has(order.id));
   marketState.replaceOpenOrders(plan.tokenId, remainingOrders);
@@ -870,16 +1043,22 @@ async function reconcileQuotePlan(
             side: Side.BUY,
             price: plan.buyBand.price,
             size: decision.size,
-          };
-          if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
-            const order = await client.createOrder({
-              tokenID: plan.tokenId,
-              price: plan.buyBand.price,
-              size: decision.size,
-              side: Side.BUY,
-            });
-            reserveBuyCollateral(decision.collateral, globalBudget, marketBudget);
-            marketState.recordPendingOrder(proposedOrder);
+        };
+        if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
+          const order = await client.createOrder({
+            tokenID: plan.tokenId,
+            price: plan.buyBand.price,
+            size: decision.size,
+            side: Side.BUY,
+          });
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
+          reserveBuyCollateral(decision.collateral, globalBudget, marketBudget);
+          marketState.recordPendingOrder(proposedOrder);
             responses.push([
               Side.BUY,
               await client.postOrder(order, OrderType.GTC, false, config.postOnly),
@@ -908,12 +1087,18 @@ async function reconcileQuotePlan(
           size,
         };
         if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
           const order = await client.createOrder({
             tokenID: plan.tokenId,
             price: plan.sellBand.price,
             size,
             side: Side.SELL,
           });
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
           marketState.recordPendingOrder(proposedOrder);
           responses.push([
             Side.SELL,
@@ -941,6 +1126,140 @@ async function openOrdersForToken(
 ): Promise<OpenOrder[]> {
   const orders = await client.getOpenOrders({ asset_id: tokenId });
   return orders.filter(isOpenOrder);
+}
+
+export async function cancelScopeOrders(
+  publicClient: ClobClient,
+  liveClient: ClobClient,
+  config: Config,
+  managedScope?: Market[],
+): Promise<void> {
+  const markets = managedScope?.length
+    ? [...managedScope]
+    : await discoverCancelMarkets(publicClient, config);
+  if (markets.length === 0) {
+    console.log("cancel-all: no scoped markets found");
+    return;
+  }
+
+  console.log(`cancel-all: checking ${markets.length} scoped markets`);
+  const summary = await cancelOpenOrdersForMarkets(liveClient, markets);
+  printCancelSummary(summary);
+  if (summary.remainingOpen > 0) {
+    throw new Error(`cancel-all left ${summary.remainingOpen} scoped open orders after verification`);
+  }
+}
+
+async function discoverCancelMarkets(
+  publicClient: ClobClient,
+  config: Config,
+): Promise<Market[]> {
+  const eventSlug = config.eventSlug?.trim();
+  if (eventSlug) {
+    const markets = await discoverEventMarkets(publicClient, eventSlug, config.maxPages);
+    return selectEventCandidates(markets, config.maxMarkets).map((candidate) => candidate.market);
+  }
+
+  const seen = await loadSeenMarkets(config.statePath);
+  const markets = await discoverMarkets(publicClient, config.discovery, config.maxPages);
+  return selectCandidates(markets, seen, config.maxMarkets).map((candidate) => candidate.market);
+}
+
+export async function cancelOpenOrdersForMarkets(
+  client: ClobClient,
+  markets: Market[],
+): Promise<CancelOpenOrdersSummary> {
+  const tokenIds = managedTokenIds(markets);
+  const summary: CancelOpenOrdersSummary = {
+    marketsChecked: markets.length,
+    tokensChecked: tokenIds.length,
+    ordersFound: 0,
+    canceled: 0,
+    notCanceled: 0,
+    remainingOpen: 0,
+  };
+
+  for (const tokenId of tokenIds) {
+    const openOrders = await openOrdersForToken(client, tokenId);
+    if (openOrders.length === 0) {
+      continue;
+    }
+
+    console.log(`cancel-all: token ${tokenId} has ${openOrders.length} open orders`);
+    summary.ordersFound += openOrders.length;
+    const orderIds = openOrders.map((order) => order.id).filter((id) => id.length > 0);
+    for (const batch of batched(orderIds, CANCEL_ORDER_BATCH_SIZE)) {
+      const response = await client.cancelOrders(batch);
+      const canceled = responseList(response, "canceled");
+      const notCanceled = responseList(response, "not_canceled");
+      summary.canceled += canceled.length;
+      summary.notCanceled += notCanceled.length;
+      console.log(
+        `cancel-all: token ${tokenId} requested=${batch.length} ` +
+          `canceled=${canceled.length} not_canceled=${notCanceled.length}`,
+      );
+    }
+  }
+
+  if (summary.ordersFound > 0) {
+    for (let attempt = 1; attempt <= CANCEL_VERIFY_ATTEMPTS; attempt += 1) {
+      summary.remainingOpen = await remainingOpenOrdersForTokens(client, tokenIds);
+      if (summary.remainingOpen === 0) {
+        break;
+      }
+      if (attempt < CANCEL_VERIFY_ATTEMPTS) {
+        console.log(
+          `cancel-all: ${summary.remainingOpen} scoped open orders remain; ` +
+            `waiting ${CANCEL_VERIFY_DELAY_SECS}s before verification retry`,
+        );
+        await sleep(CANCEL_VERIFY_DELAY_SECS * 1000);
+      }
+    }
+  }
+
+  return summary;
+}
+
+export function managedTokenIds(markets: Market[]): string[] {
+  const tokenIds: string[] = [];
+  const seen = new Set<string>();
+  for (const market of markets) {
+    for (const token of marketTokens(market)) {
+      const tokenId = tokenIdFromToken(token);
+      if (tokenId && !seen.has(tokenId)) {
+        seen.add(tokenId);
+        tokenIds.push(tokenId);
+      }
+    }
+  }
+  return tokenIds;
+}
+
+async function remainingOpenOrdersForTokens(
+  client: ClobClient,
+  tokenIds: string[],
+): Promise<number> {
+  const counts = await Promise.all(
+    tokenIds.map(async (tokenId) => (await openOrdersForToken(client, tokenId)).length),
+  );
+  return counts.reduce((total, count) => total + count, 0);
+}
+
+function printCancelSummary(summary: CancelOpenOrdersSummary): void {
+  console.log(
+    "cancel-all: summary " +
+      `markets=${summary.marketsChecked} tokens=${summary.tokensChecked} ` +
+      `orders_found=${summary.ordersFound} canceled=${summary.canceled} ` +
+      `not_canceled=${summary.notCanceled} remaining_open=${summary.remainingOpen}`,
+  );
+}
+
+function batched<T>(items: T[], batchSize: number): T[][] {
+  const batches: T[][] = [];
+  for (let index = 0; index < items.length; index += batchSize) {
+    batches.push(items.slice(index, index + batchSize));
+  }
+  return batches;
 }
 
 function buyTopUpDecision(

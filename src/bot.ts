@@ -4,8 +4,10 @@ import { ClobClient } from "../vendor/clob-client/dist/client.js";
 import { END_CURSOR, INITIAL_CURSOR } from "../vendor/clob-client/dist/constants.js";
 import { SignatureType } from "../vendor/clob-client/dist/order-utils/model/signature-types.model.js";
 import {
+  AssetType,
   type ApiKeyCreds,
   Chain,
+  type OpenOrder,
   type OrderBookSummary,
   type OrderResponse,
   type OrderSummary,
@@ -19,6 +21,7 @@ import {
   includesBuy,
   includesSell,
 } from "./config.js";
+import { conditionIdFromMarket, conditionIdsFromSiteConfig } from "./event-scope.js";
 import { fairPrice, quotePrices } from "./pricing.js";
 import {
   loadSeenMarkets,
@@ -29,6 +32,7 @@ import {
 
 type Market = Record<string, unknown>;
 type Token = Record<string, unknown>;
+const CONDITIONAL_TOKEN_BASE_UNITS = 1_000_000;
 
 interface MarketCandidate {
   market: Market;
@@ -49,6 +53,48 @@ interface QuotePlan {
   size: number;
 }
 
+export class RiskBudget {
+  private remaining: number;
+  private readonly countedOpenBuyOrders = new Set<string>();
+
+  constructor(collateralLimit: number) {
+    this.remaining = Math.max(collateralLimit, 0);
+  }
+
+  remainingCollateral(): number {
+    return Math.max(this.remaining, 0);
+  }
+
+  reserveOpenBuyOrder(order: OpenOrder): void {
+    if (order.side !== Side.BUY || this.countedOpenBuyOrders.has(order.id)) {
+      return;
+    }
+    this.countedOpenBuyOrders.add(order.id);
+    this.remaining = Math.max(
+      this.remaining - openOrderRemainingSize(order) * numberOrDefault(order.price, 0),
+      0,
+    );
+  }
+
+  reserveNewCollateral(requested: number): number {
+    const reserved = Math.min(Math.max(requested, 0), this.remainingCollateral());
+    this.remaining = Math.max(this.remaining - reserved, 0);
+    return reserved;
+  }
+}
+
+interface BuyTopUpPlace {
+  kind: "place";
+  size: number;
+}
+
+interface BuyTopUpSkip {
+  kind: "skip";
+  affordableSize: number;
+}
+
+type BuyTopUpDecision = BuyTopUpPlace | BuyTopUpSkip;
+
 export async function run(config: Config): Promise<void> {
   const publicClient = new ClobClient(
     config.clobHost,
@@ -58,20 +104,30 @@ export async function run(config: Config): Promise<void> {
   const seen = await loadSeenMarkets(config.statePath);
 
   for (let cycle = 1; cycle <= config.cycles; cycle += 1) {
-    console.log(`cycle ${cycle}/${config.cycles}: discovering markets`);
+    const eventSlug = config.eventSlug?.trim();
+    let candidates: MarketCandidate[];
+    if (eventSlug) {
+      console.log(
+        `cycle ${cycle}/${config.cycles}: discovering markets for event ${eventSlug}`,
+      );
+      const markets = await discoverEventMarkets(publicClient, eventSlug, config.maxPages);
+      candidates = selectEventCandidates(markets, config.maxMarkets);
+      console.log(`event ${eventSlug}: found ${candidates.length} tradable markets`);
+    } else {
+      console.log(`cycle ${cycle}/${config.cycles}: discovering markets`);
+      const markets = await discoverMarkets(
+        publicClient,
+        config.discovery,
+        config.maxPages,
+      );
+      candidates = selectCandidates(markets, seen, config.maxMarkets);
+      await saveSeenMarkets(config.statePath, seen);
 
-    const markets = await discoverMarkets(
-      publicClient,
-      config.discovery,
-      config.maxPages,
-    );
-    const candidates = selectCandidates(markets, seen, config.maxMarkets);
-    await saveSeenMarkets(config.statePath, seen);
-
-    const newCount = candidates.filter((candidate) => candidate.isNew).length;
-    console.log(
-      `found ${candidates.length} tradable fork-scoped markets (${newCount} new)`,
-    );
+      const newCount = candidates.filter((candidate) => candidate.isNew).length;
+      console.log(
+        `found ${candidates.length} tradable fork-scoped markets (${newCount} new)`,
+      );
+    }
 
     for (const candidate of candidates) {
       const marker = candidate.isNew ? "new" : "seen";
@@ -84,8 +140,9 @@ export async function run(config: Config): Promise<void> {
       continue;
     }
 
+    const riskBudget = new RiskBudget(config.maxTotalCollateral);
     for (const candidate of candidates) {
-      await quoteMarket(publicClient, liveClient, candidate.market, config);
+      await quoteMarket(publicClient, liveClient, candidate.market, config, riskBudget);
     }
 
     if (cycle < config.cycles) {
@@ -135,6 +192,22 @@ export async function discoverMarkets(
   return fetchMarketPages(client, mode, maxPages);
 }
 
+export async function discoverEventMarkets(
+  client: ClobClient,
+  eventSlug: string,
+  maxPages: number,
+): Promise<Market[]> {
+  const conditionIds = await conditionIdsFromSiteConfig(eventSlug, maxPages);
+  const markets: Market[] = [];
+  for (const conditionId of [...conditionIds].sort()) {
+    const market = await client.getMarket(conditionId);
+    if (isMarket(market)) {
+      markets.push(market);
+    }
+  }
+  return markets;
+}
+
 export async function fetchMarketPages(
   client: ClobClient,
   mode: Exclude<DiscoveryMode, "auto">,
@@ -173,6 +246,26 @@ export function selectCandidates(
     isNew: markNew(seen, marketKey(market)),
   }));
 
+  sortCandidates(candidates);
+
+  return candidates.slice(0, maxMarkets);
+}
+
+export function selectEventCandidates(
+  markets: Market[],
+  maxMarkets: number,
+): MarketCandidate[] {
+  const candidates = markets.filter(isTradableMarket).map((market) => ({
+    market,
+    isNew: false,
+  }));
+
+  sortCandidates(candidates);
+
+  return candidates.slice(0, maxMarkets);
+}
+
+function sortCandidates(candidates: MarketCandidate[]): void {
   candidates.sort((left, right) => {
     if (left.isNew !== right.isNew) {
       return left.isNew ? -1 : 1;
@@ -191,8 +284,6 @@ export function selectCandidates(
     }
     return marketSlug(left.market).localeCompare(marketSlug(right.market));
   });
-
-  return candidates.slice(0, maxMarkets);
 }
 
 export function isTradableMarket(market: Market): boolean {
@@ -214,11 +305,7 @@ export function hasRewards(market: Market): boolean {
 }
 
 export function marketKey(market: Market): string {
-  return (
-    stringOrUndefined(
-      field(market, "condition_id", "conditionId", "conditionID", "c"),
-    ) ?? marketSlug(market)
-  );
+  return conditionIdFromMarket(market) ?? marketSlug(market);
 }
 
 async function quoteMarket(
@@ -226,7 +313,9 @@ async function quoteMarket(
   liveClient: ClobClient | undefined,
   market: Market,
   config: Config,
+  globalBudget: RiskBudget,
 ): Promise<void> {
+  const marketBudget = new RiskBudget(config.maxCollateralPerMarket);
   for (const token of marketTokens(market)) {
     const tokenId = tokenIdFromToken(token);
     if (!tokenId) {
@@ -244,7 +333,7 @@ async function quoteMarket(
 
     printPlan(plan, config.live);
     if (liveClient) {
-      await postQuotePlan(liveClient, plan, config);
+      await reconcileQuotePlan(liveClient, plan, config, globalBudget, marketBudget);
     }
   }
 }
@@ -263,6 +352,18 @@ export function buildQuotePlan(
     numberOrDefault(field(token, "price", "p"), 0),
     numberOrUndefined(book.last_trade_price),
   );
+  if (
+    config.live &&
+    config.requireTwoSidedLive &&
+    !(
+      bestBidPrice !== undefined &&
+      bestAskPrice !== undefined &&
+      bestBidPrice > 0 &&
+      bestAskPrice > bestBidPrice
+    )
+  ) {
+    return undefined;
+  }
   const tick = numberOrDefault(book.tick_size, 0.01);
   let [buyPrice, sellPrice] = quotePrices(
     fair,
@@ -272,6 +373,13 @@ export function buildQuotePlan(
     config.edgeTicks,
     config.minSpreadTicks,
   );
+
+  if (buyPrice !== undefined && !priceInConfiguredRange(buyPrice, config)) {
+    buyPrice = undefined;
+  }
+  if (sellPrice !== undefined && !priceInConfiguredRange(sellPrice, config)) {
+    sellPrice = undefined;
+  }
 
   if (!includesBuy(config.quoteSides)) {
     buyPrice = undefined;
@@ -326,6 +434,10 @@ export function orderSize(market: Market, config: Config): number {
   return size;
 }
 
+function priceInConfiguredRange(price: number, config: Config): boolean {
+  return price >= config.minPrice && price <= config.maxPrice;
+}
+
 function printPlan(plan: QuotePlan, live: boolean): void {
   const mode = live ? "live" : "dry-run";
   console.log(
@@ -335,51 +447,288 @@ function printPlan(plan: QuotePlan, live: boolean): void {
   );
 }
 
-async function postQuotePlan(
+async function reconcileQuotePlan(
   client: ClobClient,
   plan: QuotePlan,
   config: Config,
+  globalBudget: RiskBudget,
+  marketBudget: RiskBudget,
 ): Promise<void> {
-  if (config.cancelBeforeQuote) {
-    const response = await client.cancelMarketOrders({
-      asset_id: plan.tokenId,
-    });
+  const openOrders = await openOrdersForToken(client, plan.tokenId);
+  const ordersToCancel = cancellableOrders(openOrders, plan, config);
+  if (config.cancelBeforeQuote && ordersToCancel.length > 0) {
+    const response = await client.cancelOrders(ordersToCancel.map((order) => order.id));
     const canceled = responseList(response, "canceled");
     const notCanceled = responseList(response, "not_canceled");
-    if (canceled.length > 0 || notCanceled.length > 0) {
+    console.log(
+      `canceled stale orders for ${plan.tokenId}: canceled=${canceled.length} not_canceled=${notCanceled.length}`,
+    );
+    if (notCanceled.length > 0) {
       console.log(
-        `canceled stale orders for ${plan.tokenId}: canceled=${canceled.length} not_canceled=${notCanceled.length}`,
+        `skip placing ${plan.marketSlug} ${plan.outcome}: some stale orders could not be canceled`,
       );
+      return;
     }
   }
 
-  const responses: Array<[Side, OrderResponse]> = [];
-  if (plan.buyPrice !== undefined) {
-    const order = await client.createOrder({
-      tokenID: plan.tokenId,
-      price: plan.buyPrice,
-      size: plan.size,
-      side: Side.BUY,
-    });
-    responses.push([
-      Side.BUY,
-      await client.postOrder(order, OrderType.GTC, false, config.postOnly),
-    ]);
-  }
-  if (plan.sellPrice !== undefined) {
-    const order = await client.createOrder({
-      tokenID: plan.tokenId,
-      price: plan.sellPrice,
-      size: plan.size,
-      side: Side.SELL,
-    });
-    responses.push([
-      Side.SELL,
-      await client.postOrder(order, OrderType.GTC, false, config.postOnly),
-    ]);
+  const canceledIds = new Set(ordersToCancel.map((order) => order.id));
+  const remainingOrders = openOrders.filter((order) => !canceledIds.has(order.id));
+  for (const order of remainingOrders) {
+    globalBudget.reserveOpenBuyOrder(order);
+    marketBudget.reserveOpenBuyOrder(order);
   }
 
+  const collateral = await collateralBalance(client);
+  const tokenBalance = await conditionalBalance(client, plan.tokenId);
+  const lockedCollateral = remainingOrders
+    .filter((order) => order.side === Side.BUY)
+    .reduce(
+      (total, order) =>
+        total + openOrderRemainingSize(order) * numberOrDefault(order.price, 0),
+      0,
+    );
+  const lockedTokens = remainingOrders
+    .filter((order) => order.side === Side.SELL)
+    .reduce((total, order) => total + openOrderRemainingSize(order), 0);
+  const freeCollateral = Math.max(
+    collateral - lockedCollateral - config.minFreeCollateral,
+    0,
+  );
+  const freeTokens = Math.max(tokenBalance - lockedTokens, 0);
+  let newOrderSlots = Math.max(
+    config.maxOpenOrdersPerToken - remainingOrders.length,
+    0,
+  );
+
+  const responses: Array<[Side, OrderResponse]> = [];
+  if (plan.buyPrice !== undefined) {
+    if (newOrderSlots > 0) {
+      const openSize = matchingOpenSize(remainingOrders, Side.BUY, plan.buyPrice);
+      if (openSize < plan.size) {
+        const missingSize = plan.size - openSize;
+        const decision = reserveBuyTopUp(
+          missingSize,
+          plan.buyPrice,
+          freeCollateral,
+          globalBudget,
+          marketBudget,
+        );
+        if (decision.kind === "place") {
+          const order = await client.createOrder({
+            tokenID: plan.tokenId,
+            price: plan.buyPrice,
+            size: decision.size,
+            side: Side.BUY,
+          });
+          responses.push([
+            Side.BUY,
+            await client.postOrder(order, OrderType.GTC, false, config.postOnly),
+          ]);
+          newOrderSlots -= 1;
+        } else {
+          console.log(
+            `skip ${plan.marketSlug} ${plan.outcome} buy: ` +
+              `risk budget/free collateral leaves size ${decision.affordableSize} below required ${missingSize}`,
+          );
+        }
+      }
+    }
+  }
+  if (plan.sellPrice !== undefined && newOrderSlots > 0) {
+    const openSize = matchingOpenSize(remainingOrders, Side.SELL, plan.sellPrice);
+    if (openSize < plan.size) {
+      const missingSize = plan.size - openSize;
+      const size = Math.min(missingSize, freeTokens);
+      if (size >= missingSize) {
+        const order = await client.createOrder({
+          tokenID: plan.tokenId,
+          price: plan.sellPrice,
+          size,
+          side: Side.SELL,
+        });
+        responses.push([
+          Side.SELL,
+          await client.postOrder(order, OrderType.GTC, false, config.postOnly),
+        ]);
+      } else {
+        console.log(
+          `skip ${plan.marketSlug} ${plan.outcome} sell: ` +
+            `free token balance leaves size ${size} below required ${missingSize}`,
+        );
+      }
+    }
+  }
+
+  if (responses.length === 0) {
+    return;
+  }
   printPostResponses(plan, responses);
+}
+
+async function openOrdersForToken(
+  client: ClobClient,
+  tokenId: string,
+): Promise<OpenOrder[]> {
+  const orders = await client.getOpenOrders({ asset_id: tokenId });
+  return orders.filter(isOpenOrder);
+}
+
+function reserveBuyTopUp(
+  missingSize: number,
+  price: number,
+  freeCollateral: number,
+  globalBudget: RiskBudget,
+  marketBudget: RiskBudget,
+): BuyTopUpDecision {
+  const affordableSize = affordableBuySize(
+    missingSize,
+    price,
+    freeCollateral,
+    globalBudget,
+    marketBudget,
+  );
+  if (affordableSize < missingSize) {
+    return { kind: "skip", affordableSize };
+  }
+
+  const collateral = missingSize * price;
+  const globalReserved = globalBudget.reserveNewCollateral(collateral);
+  const marketReserved = marketBudget.reserveNewCollateral(globalReserved);
+  if (globalReserved !== collateral || marketReserved !== collateral) {
+    return { kind: "skip", affordableSize };
+  }
+  return { kind: "place", size: missingSize };
+}
+
+export function affordableBuySize(
+  missingSize: number,
+  price: number,
+  freeCollateral: number,
+  globalBudget: RiskBudget,
+  marketBudget: RiskBudget,
+): number {
+  if (missingSize <= 0 || price <= 0) {
+    return 0;
+  }
+
+  const requestedCollateral = missingSize * price;
+  const affordableCollateral = Math.min(
+    requestedCollateral,
+    freeCollateral,
+    globalBudget.remainingCollateral(),
+    marketBudget.remainingCollateral(),
+  );
+  return affordableCollateral / price;
+}
+
+async function collateralBalance(client: ClobClient): Promise<number> {
+  const response = await client.getBalanceAllowance({
+    asset_type: AssetType.COLLATERAL,
+  });
+  return numberOrDefault(response.balance, 0) / CONDITIONAL_TOKEN_BASE_UNITS;
+}
+
+async function conditionalBalance(client: ClobClient, tokenId: string): Promise<number> {
+  const response = await client.getBalanceAllowance({
+    asset_type: AssetType.CONDITIONAL,
+    token_id: tokenId,
+  });
+  return numberOrDefault(response.balance, 0) / CONDITIONAL_TOKEN_BASE_UNITS;
+}
+
+function cancellableOrders(
+  openOrders: OpenOrder[],
+  plan: QuotePlan,
+  config: Config,
+): OpenOrder[] {
+  if (!config.cancelBeforeQuote) {
+    return [];
+  }
+
+  const cancellable: OpenOrder[] = [];
+  const cancellableIds = new Set<string>();
+  for (const order of openOrders) {
+    if (orderShouldCancel(order, plan)) {
+      cancellable.push(order);
+      cancellableIds.add(order.id);
+    }
+  }
+
+  for (const [side, targetPrice] of [
+    [Side.BUY, plan.buyPrice],
+    [Side.SELL, plan.sellPrice],
+  ] as const) {
+    if (targetPrice === undefined) {
+      continue;
+    }
+    const matchingOrders = openOrders.filter(
+      (order) =>
+        !cancellableIds.has(order.id) &&
+        order.side === side &&
+        numberOrDefault(order.price, 0) === targetPrice,
+    );
+    const matchingSize = matchingOrders.reduce(
+      (total, order) => total + openOrderRemainingSize(order),
+      0,
+    );
+    if (matchingSize > plan.size) {
+      for (const order of matchingOrders) {
+        if (!cancellableIds.has(order.id)) {
+          cancellableIds.add(order.id);
+          cancellable.push(order);
+        }
+      }
+    }
+  }
+
+  const kept = openOrders
+    .filter((order) => !cancellableIds.has(order.id))
+    .sort((left, right) => left.created_at - right.created_at);
+  if (kept.length > config.maxOpenOrdersPerToken) {
+    for (const order of kept.slice(config.maxOpenOrdersPerToken)) {
+      if (!cancellableIds.has(order.id)) {
+        cancellableIds.add(order.id);
+        cancellable.push(order);
+      }
+    }
+  }
+
+  return cancellable;
+}
+
+function orderShouldCancel(order: OpenOrder, plan: QuotePlan): boolean {
+  if (openOrderRemainingSize(order) <= 0) {
+    return true;
+  }
+  if (order.side === Side.BUY) {
+    return plan.buyPrice !== numberOrDefault(order.price, 0);
+  }
+  if (order.side === Side.SELL) {
+    return plan.sellPrice !== numberOrDefault(order.price, 0);
+  }
+  return true;
+}
+
+function matchingOpenSize(
+  orders: OpenOrder[],
+  side: Side,
+  price: number,
+): number {
+  return orders
+    .filter((order) => order.side === side && numberOrDefault(order.price, 0) === price)
+    .reduce((total, order) => total + openOrderRemainingSize(order), 0);
+}
+
+function openOrderRemainingSize(order: OpenOrder): number {
+  return Math.max(
+    numberOrDefault(order.original_size, 0) -
+      numberOrDefault(order.size_matched, 0),
+    0,
+  );
+}
+
+function isOpenOrder(order: OpenOrder): boolean {
+  return ["live", "unmatched", "delayed"].includes(order.status.toLowerCase());
 }
 
 function printPostResponses(

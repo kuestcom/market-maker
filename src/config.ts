@@ -11,6 +11,7 @@ export interface Config {
   depositWallet?: string;
   chainId?: number;
   discovery: DiscoveryMode;
+  eventSlug?: string;
   maxMarkets: number;
   maxPages: number;
   orderSize: number;
@@ -21,6 +22,13 @@ export interface Config {
   respectRewardMinSize: boolean;
   cancelBeforeQuote: boolean;
   postOnly: boolean;
+  requireTwoSidedLive: boolean;
+  minPrice: number;
+  maxPrice: number;
+  maxCollateralPerMarket: number;
+  maxTotalCollateral: number;
+  minFreeCollateral: number;
+  maxOpenOrdersPerToken: number;
   discoverOnly: boolean;
   cycles: number;
   refreshSecs: number;
@@ -36,6 +44,7 @@ Options:
   --deposit-wallet <address>        KUEST_DEPOSIT_WALLET, required with --live
   --chain-id <id>                   KUEST_CHAIN_ID, 137 Polygon or 80002 Amoy
   --discovery <mode>                MARKET_MAKER_DISCOVERY, auto | sampling | site
+  --event-slug <slug>               MARKET_MAKER_EVENT_SLUG
   --max-markets <n>                 MARKET_MAKER_MAX_MARKETS, default 3
   --max-pages <n>                   MARKET_MAKER_MAX_PAGES, default 5
   --order-size <n>                  MARKET_MAKER_ORDER_SIZE, default 5
@@ -46,6 +55,13 @@ Options:
   --respect-reward-min-size         MARKET_MAKER_RESPECT_REWARD_MIN_SIZE, default false
   --cancel-before-quote             MARKET_MAKER_CANCEL_BEFORE_QUOTE, default true
   --post-only                       MARKET_MAKER_POST_ONLY, default true
+  --require-two-sided-live          MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE, default true
+  --min-price <n>                   MARKET_MAKER_MIN_PRICE, default 0.05
+  --max-price <n>                   MARKET_MAKER_MAX_PRICE, default 0.95
+  --max-collateral-per-market <n>   MARKET_MAKER_MAX_COLLATERAL_PER_MARKET, default 25
+  --max-total-collateral <n>        MARKET_MAKER_MAX_TOTAL_COLLATERAL, default 50
+  --min-free-collateral <n>         MARKET_MAKER_MIN_FREE_COLLATERAL, default 1
+  --max-open-orders-per-token <n>   MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN, default 2
   --discover-only                   MARKET_MAKER_DISCOVER_ONLY, default false
   --cycles <n>                      MARKET_MAKER_CYCLES, default 1
   --refresh-secs <n>                MARKET_MAKER_REFRESH_SECS, default 30
@@ -61,6 +77,7 @@ const knownOptions = new Set([
   "deposit-wallet",
   "chain-id",
   "discovery",
+  "event-slug",
   "max-markets",
   "max-pages",
   "order-size",
@@ -71,6 +88,13 @@ const knownOptions = new Set([
   "respect-reward-min-size",
   "cancel-before-quote",
   "post-only",
+  "require-two-sided-live",
+  "min-price",
+  "max-price",
+  "max-collateral-per-market",
+  "max-total-collateral",
+  "min-free-collateral",
+  "max-open-orders-per-token",
   "discover-only",
   "cycles",
   "refresh-secs",
@@ -112,6 +136,12 @@ export function parseConfig(
       "MARKET_MAKER_DISCOVERY",
       "auto",
       ["auto", "sampling", "site"],
+    ),
+    eventSlug: optionalRawStringArg(
+      args,
+      env,
+      "event-slug",
+      "MARKET_MAKER_EVENT_SLUG",
     ),
     maxMarkets: numberArg(
       args,
@@ -165,6 +195,43 @@ export function parseConfig(
       "post-only",
       "MARKET_MAKER_POST_ONLY",
       true,
+    ),
+    requireTwoSidedLive: booleanArg(
+      args,
+      env,
+      "require-two-sided-live",
+      "MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE",
+      true,
+    ),
+    minPrice: numberArg(args, env, "min-price", "MARKET_MAKER_MIN_PRICE", 0.05),
+    maxPrice: numberArg(args, env, "max-price", "MARKET_MAKER_MAX_PRICE", 0.95),
+    maxCollateralPerMarket: numberArg(
+      args,
+      env,
+      "max-collateral-per-market",
+      "MARKET_MAKER_MAX_COLLATERAL_PER_MARKET",
+      25,
+    ),
+    maxTotalCollateral: numberArg(
+      args,
+      env,
+      "max-total-collateral",
+      "MARKET_MAKER_MAX_TOTAL_COLLATERAL",
+      50,
+    ),
+    minFreeCollateral: numberArg(
+      args,
+      env,
+      "min-free-collateral",
+      "MARKET_MAKER_MIN_FREE_COLLATERAL",
+      1,
+    ),
+    maxOpenOrdersPerToken: numberArg(
+      args,
+      env,
+      "max-open-orders-per-token",
+      "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN",
+      2,
     ),
     discoverOnly: booleanArg(
       args,
@@ -258,6 +325,19 @@ function optionalStringArg(
   }
   const normalized = String(value).trim();
   return normalized || undefined;
+}
+
+function optionalRawStringArg(
+  args: Map<string, CliValue>,
+  env: NodeJS.ProcessEnv,
+  key: string,
+  envKey: string,
+): string | undefined {
+  const value = args.get(key) ?? env[envKey];
+  if (value === undefined || value === false) {
+    return undefined;
+  }
+  return String(value);
 }
 
 function stringArg(
@@ -357,6 +437,36 @@ function validateConfig(config: Config): void {
   }
   if (config.minSpreadTicks <= 0) {
     throw new Error("MARKET_MAKER_MIN_SPREAD_TICKS must be greater than zero");
+  }
+  if (config.eventSlug !== undefined && config.eventSlug.trim() === "") {
+    throw new Error("MARKET_MAKER_EVENT_SLUG cannot be empty");
+  }
+  if (config.minPrice <= 0 || config.minPrice >= 1) {
+    throw new Error("MARKET_MAKER_MIN_PRICE must be between 0 and 1");
+  }
+  if (config.maxPrice <= 0 || config.maxPrice >= 1) {
+    throw new Error("MARKET_MAKER_MAX_PRICE must be between 0 and 1");
+  }
+  if (config.minPrice >= config.maxPrice) {
+    throw new Error(
+      "MARKET_MAKER_MIN_PRICE must be less than MARKET_MAKER_MAX_PRICE",
+    );
+  }
+  if (config.maxCollateralPerMarket <= 0) {
+    throw new Error(
+      "MARKET_MAKER_MAX_COLLATERAL_PER_MARKET must be greater than zero",
+    );
+  }
+  if (config.maxTotalCollateral <= 0) {
+    throw new Error("MARKET_MAKER_MAX_TOTAL_COLLATERAL must be greater than zero");
+  }
+  if (config.minFreeCollateral < 0) {
+    throw new Error("MARKET_MAKER_MIN_FREE_COLLATERAL cannot be negative");
+  }
+  if (config.maxOpenOrdersPerToken <= 0) {
+    throw new Error(
+      "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN must be greater than zero",
+    );
   }
   if (config.cycles <= 0) {
     throw new Error("MARKET_MAKER_CYCLES must be greater than zero");

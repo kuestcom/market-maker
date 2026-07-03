@@ -302,6 +302,14 @@ async function runWithCancelOnExit(
 ): Promise<void> {
   const managedScope: Market[] = [];
   const shutdown: ShutdownState = { abortController: new AbortController() };
+  let cancelTask: Promise<void> | undefined;
+  const cancelScopedOrders = async (): Promise<void> => {
+    try {
+      await cancelScopeOrders(publicClient, liveClient, config, managedScope);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+    }
+  };
   const requestShutdown = (signal: NodeJS.Signals): void => {
     if (shutdown.requestedSignal) {
       return;
@@ -309,19 +317,30 @@ async function runWithCancelOnExit(
     shutdown.requestedSignal = signal;
     shutdown.abortController?.abort();
     console.log(`shutdown requested: received ${signal}; stopping quote loop before canceling scoped open orders`);
+    cancelTask = cancelScopedOrders();
   };
 
   process.once("SIGINT", requestShutdown);
   process.once("SIGTERM", requestShutdown);
+  let cycleError: unknown;
   try {
     await runCycles(publicClient, liveClient, config, managedScope, shutdown);
-    if (shutdown.requestedSignal) {
-      await cancelScopeOrders(publicClient, liveClient, config, managedScope);
-      process.exitCode = signalExitCode(shutdown.requestedSignal);
-    }
+  } catch (error) {
+    cycleError = error;
   } finally {
     process.off("SIGINT", requestShutdown);
     process.off("SIGTERM", requestShutdown);
+  }
+
+  if (shutdown.requestedSignal) {
+    await cancelTask;
+    await cancelScopedOrders();
+    process.exitCode = signalExitCode(shutdown.requestedSignal);
+    return;
+  }
+
+  if (cycleError !== undefined) {
+    throw cycleError;
   }
 }
 

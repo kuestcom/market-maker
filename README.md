@@ -96,10 +96,11 @@ Without `--event-slug`, it targets the normal discovery selection.
 bot was running, so a transient empty discovery cycle does not clear the
 emergency cancel target.
 
-Live mode also checks open orders and balances before posting. It subtracts
-collateral already locked by live buy orders, checks sell orders against
-available outcome-token balance, respects configured collateral caps, and
-blocks quotes whose simulated fill would exceed the configured market loss cap.
+Live mode runs a preflight risk audit on the selected market scope before
+quoting. It checks open orders and balances, subtracts collateral already locked
+by live buy orders, checks sell orders against available outcome-token balance,
+respects configured collateral caps, and blocks quotes whose simulated fill
+would exceed the configured market loss cap.
 Buy-side sizing is inventory-aware: token balances, live open buys, and pending
 buys are counted before adding more long exposure to an outcome or market. If
 live state already breaches inventory, loss, or market-collateral caps, the bot

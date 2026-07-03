@@ -14,6 +14,7 @@ import {
   OrderType,
   type PaginationPayload,
   Side,
+  type Trade,
 } from "../vendor/clob-client/dist/types.js";
 import {
   bandMarginTicks,
@@ -28,11 +29,18 @@ import { errorMessage } from "./errors.js";
 import { ceilToTick, fairPrice, floorToTick, isTradeablePrice } from "./pricing.js";
 import {
   clearPauseState,
+  fillRecordsForToken,
+  latestMatchedAtUnixSecs,
+  loadFillLedger,
   loadSeenMarkets,
   loadPauseState,
   markNew,
+  pruneFillLedgerToMaxRecords,
+  saveFillLedger,
   savePauseReason,
   saveSeenMarkets,
+  upsertFillRecord,
+  type FillRecord,
   type SeenMarkets,
 } from "./state.js";
 
@@ -96,17 +104,46 @@ export class LiveMarketState {
   static async load(
     client: ClobClient,
     tokenQuotes: TokenQuote[],
+    config?: Config,
   ): Promise<LiveMarketState> {
+    const fillLedger = config
+      ? await loadFillLedger(config.fillStatePath)
+      : { trades: new Map<string, FillRecord>() };
+    let fillLedgerChanged = false;
     const tokens: LiveTokenState[] = [];
     for (const tokenQuote of tokenQuotes) {
+      if (config) {
+        const latestMatched = latestMatchedAtUnixSecs(fillLedger, tokenQuote.tokenId);
+        const after = latestMatched === undefined ? undefined : Math.max(latestMatched - 1, 0);
+        for (const trade of await tradesForToken(client, tokenQuote.tokenId, after)) {
+          fillLedgerChanged =
+            upsertFillRecord(fillLedger, fillRecordFromTrade(trade)) || fillLedgerChanged;
+        }
+      }
+
+      const balance = await conditionalBalance(client, tokenQuote.tokenId);
+      const costBasis = tokenCostBasis(
+        fillRecordsForToken(fillLedger, tokenQuote.tokenId),
+        balance,
+        tokenQuote.fairPrice,
+      );
       tokens.push({
         tokenId: tokenQuote.tokenId,
         fairPrice: tokenQuote.fairPrice,
-        balance: await conditionalBalance(client, tokenQuote.tokenId),
+        balance,
+        costBasis,
         balanceFetchedAt: nowMs(),
         openOrders: await openOrdersForToken(client, tokenQuote.tokenId),
         openOrdersFetchedAt: nowMs(),
       });
+    }
+    if (config) {
+      fillLedgerChanged =
+        pruneFillLedgerToMaxRecords(fillLedger, config.fillMaxRecords) ||
+        fillLedgerChanged;
+      if (fillLedgerChanged) {
+        await saveFillLedger(config.fillStatePath, fillLedger);
+      }
     }
     return new LiveMarketState(tokens);
   }
@@ -256,7 +293,7 @@ export class LiveMarketState {
       this.tokens.map((token) => ({
         tokenId: token.tokenId,
         position: token.balance,
-        cost: token.balance * token.fairPrice,
+        cost: token.costBasis,
         proceeds: 0,
       })),
     );
@@ -288,6 +325,7 @@ interface LiveTokenState {
   tokenId: string;
   fairPrice: number;
   balance: number;
+  costBasis: number;
   balanceFetchedAt: number;
   openOrders: OpenOrder[];
   openOrdersFetchedAt: number;
@@ -933,7 +971,7 @@ async function preflightRiskAudit(
 
     let marketState: LiveMarketState;
     try {
-      marketState = await LiveMarketState.load(liveClient, tokenQuotes);
+      marketState = await LiveMarketState.load(liveClient, tokenQuotes, config);
     } catch (error) {
       console.log(
         `preflight risk audit skip ${marketSlug(market)}: ` +
@@ -1067,7 +1105,7 @@ async function quoteMarket(
   if (liveClient) {
     const marketState = snapshot
       ? snapshot.marketState
-      : await LiveMarketState.load(liveClient, tokenQuotes);
+      : await LiveMarketState.load(liveClient, tokenQuotes, config);
     const staleReason = preflightStaleDataReason(tokenQuotes, marketState, nowMs(), config);
     if (staleReason) {
       console.log(`skip live quote ${marketSlug(market)}: stale live data (${staleReason})`);
@@ -1873,6 +1911,94 @@ async function openOrdersForToken(
 ): Promise<OpenOrder[]> {
   const orders = await client.getOpenOrders({ asset_id: tokenId });
   return orders.filter(isOpenOrder);
+}
+
+async function tradesForToken(
+  client: ClobClient,
+  tokenId: string,
+  afterUnixSecs?: number,
+): Promise<Trade[]> {
+  const trades: Trade[] = [];
+  let cursor = INITIAL_CURSOR;
+  while (cursor !== END_CURSOR) {
+    const page = await client.getTradesPaginated(
+      {
+        asset_id: tokenId,
+        after: afterUnixSecs === undefined ? undefined : String(afterUnixSecs),
+      },
+      cursor,
+    );
+    trades.push(...page.trades.filter(isFilledTrade));
+    if (page.next_cursor === cursor || page.next_cursor === END_CURSOR) {
+      break;
+    }
+    cursor = page.next_cursor;
+  }
+  return trades;
+}
+
+function isFilledTrade(trade: Trade): boolean {
+  return ["matched", "mined", "confirmed"].includes(trade.status.toLowerCase());
+}
+
+function fillRecordFromTrade(trade: Trade): FillRecord {
+  return {
+    id: trade.id,
+    tokenId: trade.asset_id,
+    market: trade.market,
+    side: sideFromOpenOrder(trade.side) ?? "UNKNOWN",
+    size: numberOrDefault(trade.size, 0),
+    price: numberOrDefault(trade.price, 0),
+    status: trade.status,
+    matchedAtUnixSecs: tradeMatchTimeUnixSecs(trade.match_time),
+  };
+}
+
+function tradeMatchTimeUnixSecs(value: string): number {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) {
+    return Math.trunc(numeric);
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed / 1000) : 0;
+}
+
+export function tokenCostBasis(
+  fillRecords: FillRecord[],
+  liveBalance: number,
+  fallbackFairPrice: number,
+): number {
+  if (liveBalance <= 0) {
+    return 0;
+  }
+
+  let position = 0;
+  let cost = 0;
+  for (const record of fillRecords) {
+    if (record.side === Side.BUY) {
+      position += record.size;
+      cost += record.size * record.price;
+      continue;
+    }
+    if (record.side === Side.SELL) {
+      if (position <= 0) {
+        continue;
+      }
+      const sellSize = Math.min(record.size, position);
+      const averageCost = cost / position;
+      cost = Math.max(cost - averageCost * sellSize, 0);
+      position = Math.max(position - sellSize, 0);
+    }
+  }
+
+  if (position <= 0) {
+    return liveBalance * fallbackFairPrice;
+  }
+
+  const averageCost = cost / position;
+  return liveBalance <= position
+    ? liveBalance * averageCost
+    : cost + (liveBalance - position) * fallbackFairPrice;
 }
 
 export async function cancelScopeOrders(

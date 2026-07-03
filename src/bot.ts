@@ -53,6 +53,142 @@ export interface QuotePlan {
   size: number;
 }
 
+interface TokenQuote {
+  tokenId: string;
+  fairPrice: number;
+  plan?: QuotePlan;
+}
+
+class LiveMarketState {
+  constructor(
+    private readonly tokens: LiveTokenState[],
+    private readonly pendingOrders: ProposedOrder[] = [],
+  ) {}
+
+  static async load(
+    client: ClobClient,
+    tokenQuotes: TokenQuote[],
+  ): Promise<LiveMarketState> {
+    const tokens: LiveTokenState[] = [];
+    for (const tokenQuote of tokenQuotes) {
+      tokens.push({
+        tokenId: tokenQuote.tokenId,
+        fairPrice: tokenQuote.fairPrice,
+        balance: await conditionalBalance(client, tokenQuote.tokenId),
+        openOrders: await openOrdersForToken(client, tokenQuote.tokenId),
+      });
+    }
+    return new LiveMarketState(tokens);
+  }
+
+  openOrders(tokenId: string): OpenOrder[] {
+    return [...this.tokenState(tokenId).openOrders];
+  }
+
+  tokenBalance(tokenId: string): number {
+    return this.tokenState(tokenId).balance;
+  }
+
+  replaceOpenOrders(tokenId: string, openOrders: OpenOrder[]): void {
+    this.tokenState(tokenId).openOrders = [...openOrders];
+  }
+
+  recordPendingOrder(order: ProposedOrder): void {
+    this.pendingOrders.push(order);
+  }
+
+  projectedLoss(order: ProposedOrder): number {
+    const exposure = this.exposure();
+    exposure.applyOrder(order);
+    return exposure.worstLoss();
+  }
+
+  private exposure(): MarketExposure {
+    const exposure = new MarketExposure(
+      this.tokens.map((token) => ({
+        tokenId: token.tokenId,
+        position: token.balance,
+        cost: token.balance * token.fairPrice,
+        proceeds: 0,
+      })),
+    );
+
+    for (const token of this.tokens) {
+      for (const order of token.openOrders) {
+        const proposed = proposedOrderFromOpenOrder(order, token.tokenId);
+        if (proposed) {
+          exposure.applyKnownOrder(proposed);
+        }
+      }
+    }
+    for (const order of this.pendingOrders) {
+      exposure.applyKnownOrder(order);
+    }
+    return exposure;
+  }
+
+  private tokenState(tokenId: string): LiveTokenState {
+    const token = this.tokens.find((state) => state.tokenId === tokenId);
+    if (!token) {
+      throw new Error(`missing live market state for token ${tokenId}`);
+    }
+    return token;
+  }
+}
+
+interface LiveTokenState {
+  tokenId: string;
+  fairPrice: number;
+  balance: number;
+  openOrders: OpenOrder[];
+}
+
+interface ProposedOrder {
+  tokenId: string;
+  side: Side;
+  price: number;
+  size: number;
+}
+
+interface OutcomeExposure {
+  tokenId: string;
+  position: number;
+  cost: number;
+  proceeds: number;
+}
+
+export class MarketExposure {
+  constructor(private readonly outcomes: OutcomeExposure[]) {}
+
+  applyOrder(order: ProposedOrder): void {
+    const outcome = this.outcomes.find((item) => item.tokenId === order.tokenId);
+    if (!outcome) {
+      throw new Error(`missing exposure state for token ${order.tokenId}`);
+    }
+    applyOrderToOutcome(outcome, order);
+  }
+
+  applyKnownOrder(order: ProposedOrder): void {
+    const outcome = this.outcomes.find((item) => item.tokenId === order.tokenId);
+    if (outcome) {
+      applyOrderToOutcome(outcome, order);
+    }
+  }
+
+  worstLoss(): number {
+    const cost = this.outcomes.reduce((total, outcome) => total + outcome.cost, 0);
+    const proceeds = this.outcomes.reduce(
+      (total, outcome) => total + outcome.proceeds,
+      0,
+    );
+    const worstResolutionPayout =
+      this.outcomes.length > 1
+        ? Math.min(...this.outcomes.map((outcome) => outcome.position))
+        : 0;
+    return Math.max(cost - proceeds - worstResolutionPayout, 0);
+  }
+}
+
 export class RiskBudget {
   private remaining: number;
   private readonly countedOpenBuyOrders = new Set<string>();
@@ -86,6 +222,7 @@ export class RiskBudget {
 interface BuyTopUpPlace {
   kind: "place";
   size: number;
+  collateral: number;
 }
 
 interface BuyTopUpSkip {
@@ -316,6 +453,7 @@ async function quoteMarket(
   globalBudget: RiskBudget,
 ): Promise<void> {
   const marketBudget = new RiskBudget(config.maxCollateralPerMarket);
+  const tokenQuotes: TokenQuote[] = [];
   for (const token of marketTokens(market)) {
     const tokenId = tokenIdFromToken(token);
     if (!tokenId) {
@@ -323,19 +461,53 @@ async function quoteMarket(
     }
 
     const book = await publicClient.getOrderBook(tokenId);
-    const plan = buildQuotePlan(market, token, book, config);
-    if (!plan) {
+    const tokenQuote = buildTokenQuote(market, token, book, config);
+    if (!tokenQuote.plan) {
       console.log(
         `skip ${marketSlug(market)} ${tokenOutcome(token)}: no safe quote at configured edge/sides`,
       );
-      continue;
+    } else {
+      printPlan(tokenQuote.plan, config.live);
     }
 
-    printPlan(plan, config.live);
-    if (liveClient) {
-      await reconcileQuotePlan(liveClient, plan, config, globalBudget, marketBudget);
+    tokenQuotes.push(tokenQuote);
+  }
+
+  if (liveClient) {
+    const marketState = await LiveMarketState.load(liveClient, tokenQuotes);
+    for (const tokenQuote of tokenQuotes) {
+      if (tokenQuote.plan) {
+        await reconcileQuotePlan(
+          liveClient,
+          tokenQuote.plan,
+          config,
+          globalBudget,
+          marketBudget,
+          marketState,
+        );
+      }
     }
   }
+}
+
+function buildTokenQuote(
+  market: Market,
+  token: Token,
+  book: OrderBookSummary,
+  config: Config,
+): TokenQuote {
+  const bestBidPrice = bestBid(book.bids ?? []);
+  const bestAskPrice = bestAsk(book.asks ?? []);
+  return {
+    tokenId: tokenIdFromToken(token),
+    fairPrice: fairPrice(
+      bestBidPrice,
+      bestAskPrice,
+      numberOrDefault(field(token, "price", "p"), 0),
+      numberOrUndefined(book.last_trade_price),
+    ),
+    plan: buildQuotePlan(market, token, book, config),
+  };
 }
 
 export function buildQuotePlan(
@@ -453,8 +625,9 @@ async function reconcileQuotePlan(
   config: Config,
   globalBudget: RiskBudget,
   marketBudget: RiskBudget,
+  marketState: LiveMarketState,
 ): Promise<void> {
-  const openOrders = await openOrdersForToken(client, plan.tokenId);
+  const openOrders = marketState.openOrders(plan.tokenId);
   const ordersToCancel = cancellableOrders(openOrders, plan, config);
   if (config.cancelBeforeQuote && ordersToCancel.length > 0) {
     const response = await client.cancelOrders(ordersToCancel.map((order) => order.id));
@@ -473,13 +646,14 @@ async function reconcileQuotePlan(
 
   const canceledIds = new Set(ordersToCancel.map((order) => order.id));
   const remainingOrders = openOrders.filter((order) => !canceledIds.has(order.id));
+  marketState.replaceOpenOrders(plan.tokenId, remainingOrders);
   for (const order of remainingOrders) {
     globalBudget.reserveOpenBuyOrder(order);
     marketBudget.reserveOpenBuyOrder(order);
   }
 
   const collateral = await collateralBalance(client);
-  const tokenBalance = await conditionalBalance(client, plan.tokenId);
+  const tokenBalance = marketState.tokenBalance(plan.tokenId);
   const lockedCollateral = remainingOrders
     .filter((order) => order.side === Side.BUY)
     .reduce(
@@ -506,7 +680,7 @@ async function reconcileQuotePlan(
       const openSize = matchingOpenSize(remainingOrders, Side.BUY, plan.buyPrice);
       if (openSize < plan.size) {
         const missingSize = plan.size - openSize;
-        const decision = reserveBuyTopUp(
+        const decision = buyTopUpDecision(
           missingSize,
           plan.buyPrice,
           freeCollateral,
@@ -514,17 +688,27 @@ async function reconcileQuotePlan(
           marketBudget,
         );
         if (decision.kind === "place") {
-          const order = await client.createOrder({
-            tokenID: plan.tokenId,
+          const proposedOrder = {
+            tokenId: plan.tokenId,
+            side: Side.BUY,
             price: plan.buyPrice,
             size: decision.size,
-            side: Side.BUY,
-          });
-          responses.push([
-            Side.BUY,
-            await client.postOrder(order, OrderType.GTC, false, config.postOnly),
-          ]);
-          newOrderSlots -= 1;
+          };
+          if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
+            const order = await client.createOrder({
+              tokenID: plan.tokenId,
+              price: plan.buyPrice,
+              size: decision.size,
+              side: Side.BUY,
+            });
+            reserveBuyCollateral(decision.collateral, globalBudget, marketBudget);
+            marketState.recordPendingOrder(proposedOrder);
+            responses.push([
+              Side.BUY,
+              await client.postOrder(order, OrderType.GTC, false, config.postOnly),
+            ]);
+            newOrderSlots -= 1;
+          }
         } else {
           console.log(
             `skip ${plan.marketSlug} ${plan.outcome} buy: ` +
@@ -540,16 +724,25 @@ async function reconcileQuotePlan(
       const missingSize = plan.size - openSize;
       const size = Math.min(missingSize, freeTokens);
       if (size >= missingSize) {
-        const order = await client.createOrder({
-          tokenID: plan.tokenId,
+        const proposedOrder = {
+          tokenId: plan.tokenId,
+          side: Side.SELL,
           price: plan.sellPrice,
           size,
-          side: Side.SELL,
-        });
-        responses.push([
-          Side.SELL,
-          await client.postOrder(order, OrderType.GTC, false, config.postOnly),
-        ]);
+        };
+        if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
+          const order = await client.createOrder({
+            tokenID: plan.tokenId,
+            price: plan.sellPrice,
+            size,
+            side: Side.SELL,
+          });
+          marketState.recordPendingOrder(proposedOrder);
+          responses.push([
+            Side.SELL,
+            await client.postOrder(order, OrderType.GTC, false, config.postOnly),
+          ]);
+        }
       } else {
         console.log(
           `skip ${plan.marketSlug} ${plan.outcome} sell: ` +
@@ -573,7 +766,7 @@ async function openOrdersForToken(
   return orders.filter(isOpenOrder);
 }
 
-function reserveBuyTopUp(
+function buyTopUpDecision(
   missingSize: number,
   price: number,
   freeCollateral: number,
@@ -592,12 +785,19 @@ function reserveBuyTopUp(
   }
 
   const collateral = missingSize * price;
+  return { kind: "place", size: missingSize, collateral };
+}
+
+function reserveBuyCollateral(
+  collateral: number,
+  globalBudget: RiskBudget,
+  marketBudget: RiskBudget,
+): void {
   const globalReserved = globalBudget.reserveNewCollateral(collateral);
   const marketReserved = marketBudget.reserveNewCollateral(globalReserved);
   if (globalReserved !== collateral || marketReserved !== collateral) {
-    return { kind: "skip", affordableSize };
+    throw new Error("failed to reserve buy collateral after top-up decision");
   }
-  return { kind: "place", size: missingSize };
 }
 
 export function affordableBuySize(
@@ -634,6 +834,66 @@ async function conditionalBalance(client: ClobClient, tokenId: string): Promise<
     token_id: tokenId,
   });
   return numberOrDefault(response.balance, 0) / CONDITIONAL_TOKEN_BASE_UNITS;
+}
+
+function marketLossExceedsCap(
+  plan: QuotePlan,
+  proposedOrder: ProposedOrder,
+  marketState: LiveMarketState,
+  config: Config,
+): boolean {
+  const projectedLoss = marketState.projectedLoss(proposedOrder);
+  if (projectedLoss <= config.maxLossPerMarket) {
+    return false;
+  }
+
+  console.log(
+    `skip ${plan.marketSlug} ${plan.outcome} ${proposedOrder.side}: ` +
+      `projected market loss ${projectedLoss} exceeds cap ${config.maxLossPerMarket}`,
+  );
+  return true;
+}
+
+function applyOrderToOutcome(outcome: OutcomeExposure, order: ProposedOrder): void {
+  if (order.side === Side.BUY) {
+    outcome.position += order.size;
+    outcome.cost += order.size * order.price;
+    return;
+  }
+  if (order.side === Side.SELL) {
+    outcome.position -= order.size;
+    outcome.proceeds += order.size * order.price;
+  }
+}
+
+function proposedOrderFromOpenOrder(
+  order: OpenOrder,
+  defaultTokenId: string,
+): ProposedOrder | undefined {
+  const side = sideFromOpenOrder(order.side);
+  if (!side) {
+    return undefined;
+  }
+  const size = openOrderRemainingSize(order);
+  if (size <= 0) {
+    return undefined;
+  }
+  return {
+    tokenId: order.asset_id || defaultTokenId,
+    side,
+    price: numberOrDefault(order.price, 0),
+    size,
+  };
+}
+
+function sideFromOpenOrder(side: string): Side | undefined {
+  if (side === Side.BUY) {
+    return Side.BUY;
+  }
+  if (side === Side.SELL) {
+    return Side.SELL;
+  }
+  return undefined;
 }
 
 export function cancellableOrders(

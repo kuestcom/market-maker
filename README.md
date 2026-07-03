@@ -257,6 +257,12 @@ top-of-book depth before quoting.
   In live mode, skip tokens without a reliable bid and ask. Necessary because
   fallback prices like 0.5 are not safe enough for real money.
 
+  --max-data-age-secs / MARKET_MAKER_MAX_DATA_AGE_SECS
+  Default: 10.
+  Live-mode freshness limit for order books, open orders, token balances, and
+  collateral balance. Necessary because stale inputs can produce duplicate or
+  mis-sized quotes.
+
   --min-price / MARKET_MAKER_MIN_PRICE
   Default: 0.05.
   Lower bound for posted quote prices. Necessary to avoid extreme tail prices

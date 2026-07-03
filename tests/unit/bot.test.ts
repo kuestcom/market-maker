@@ -12,6 +12,7 @@ import {
     liquidityRejectReason,
     managedTokenIds,
     openOrderMatchesProposed,
+    staleInputReason,
     type QuoteBand,
     type QuotePlan,
     selectEventCandidates,
@@ -188,6 +189,13 @@ describe("bot feature #1", () => {
         ).toBe(true);
     });
 
+    it("reports stale input age once it exceeds the configured limit", () => {
+        expect(staleInputReason("order book", 1_000, 12_001, 10)).toBe(
+            "order book age 11001ms exceeds max 10000ms",
+        );
+        expect(staleInputReason("order book", 1_000, 11_000, 10)).toBeUndefined();
+    });
+
     it("collects unique managed token ids in market order", () => {
         expect(
             managedTokenIds([
@@ -313,6 +321,7 @@ function config(): Config {
         cancelAllOnExit: false,
         postOnly: true,
         requireTwoSidedLive: true,
+        maxDataAgeSecs: 10,
         minPrice: 0.05,
         maxPrice: 0.95,
         maxCollateralPerMarket: 25,
@@ -364,6 +373,7 @@ function plan(): QuotePlan {
         fairPrice: 0.5,
         bestBid: 0.49,
         bestAsk: 0.51,
+        bookFetchedAt: 1_000,
         buyBand: quoteBand(),
     };
 }

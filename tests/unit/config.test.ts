@@ -20,6 +20,7 @@ describe("config", () => {
         expect(config.maxOpenOrdersPerToken).toBe(2);
         expect(config.cancelAll).toBe(false);
         expect(config.cancelAllOnExit).toBe(false);
+        expect(config.maxDataAgeSecs).toBe(10);
     });
 
     it("rejects empty event slug", () => {
@@ -107,6 +108,12 @@ describe("config", () => {
             parseConfig(["--cancel-all", "--cancel-all-on-exit"], {}),
         ).toThrow(
             "MARKET_MAKER_CANCEL_ALL and MARKET_MAKER_CANCEL_ALL_ON_EXIT are mutually exclusive",
+        );
+    });
+
+    it("rejects non-positive max data age", () => {
+        expect(() => parseConfig(["--max-data-age-secs", "0"], {})).toThrow(
+            "MARKET_MAKER_MAX_DATA_AGE_SECS must be greater than zero",
         );
     });
 });

@@ -33,6 +33,7 @@ export interface Config {
   cancelAllOnExit: boolean;
   postOnly: boolean;
   requireTwoSidedLive: boolean;
+  maxDataAgeSecs: number;
   minPrice: number;
   maxPrice: number;
   maxCollateralPerMarket: number;
@@ -77,6 +78,7 @@ Options:
   --cancel-all-on-exit              MARKET_MAKER_CANCEL_ALL_ON_EXIT, default false
   --post-only                       MARKET_MAKER_POST_ONLY, default true
   --require-two-sided-live          MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE, default true
+  --max-data-age-secs <n>           MARKET_MAKER_MAX_DATA_AGE_SECS, default 10
   --min-price <n>                   MARKET_MAKER_MIN_PRICE, default 0.05
   --max-price <n>                   MARKET_MAKER_MAX_PRICE, default 0.95
   --max-collateral-per-market <n>   MARKET_MAKER_MAX_COLLATERAL_PER_MARKET, default 25
@@ -121,6 +123,7 @@ const knownOptions = new Set([
   "cancel-all-on-exit",
   "post-only",
   "require-two-sided-live",
+  "max-data-age-secs",
   "min-price",
   "max-price",
   "max-collateral-per-market",
@@ -299,6 +302,13 @@ export function parseConfig(
       "require-two-sided-live",
       "MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE",
       true,
+    ),
+    maxDataAgeSecs: numberArg(
+      args,
+      env,
+      "max-data-age-secs",
+      "MARKET_MAKER_MAX_DATA_AGE_SECS",
+      10,
     ),
     minPrice: numberArg(args, env, "min-price", "MARKET_MAKER_MIN_PRICE", 0.05),
     maxPrice: numberArg(args, env, "max-price", "MARKET_MAKER_MAX_PRICE", 0.95),
@@ -618,6 +628,9 @@ function validateConfig(config: Config): void {
   }
   if ((config.cancelAll || config.cancelAllOnExit) && !config.live) {
     throw new Error("--cancel-all or --cancel-all-on-exit requires --live");
+  }
+  if (config.maxDataAgeSecs <= 0) {
+    throw new Error("MARKET_MAKER_MAX_DATA_AGE_SECS must be greater than zero");
   }
   if (!config.live) {
     return;

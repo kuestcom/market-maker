@@ -53,6 +53,7 @@ export interface QuotePlan {
   fairPrice: number;
   bestBid?: number;
   bestAsk?: number;
+  bookFetchedAt: number;
   buyBand?: QuoteBand;
   sellBand?: QuoteBand;
 }
@@ -70,6 +71,7 @@ export interface QuoteBand {
 interface TokenQuote {
   tokenId: string;
   fairPrice: number;
+  bookFetchedAt: number;
   plan?: QuotePlan;
   skipReason?: string;
 }
@@ -95,7 +97,9 @@ class LiveMarketState {
         tokenId: tokenQuote.tokenId,
         fairPrice: tokenQuote.fairPrice,
         balance: await conditionalBalance(client, tokenQuote.tokenId),
+        balanceFetchedAt: nowMs(),
         openOrders: await openOrdersForToken(client, tokenQuote.tokenId),
+        openOrdersFetchedAt: nowMs(),
       });
     }
     return new LiveMarketState(tokens);
@@ -109,8 +113,17 @@ class LiveMarketState {
     return this.tokenState(tokenId).balance;
   }
 
-  replaceOpenOrders(tokenId: string, openOrders: OpenOrder[]): void {
+  stateForToken(tokenId: string): LiveTokenState | undefined {
+    return this.tokens.find((state) => state.tokenId === tokenId);
+  }
+
+  replaceOpenOrders(
+    tokenId: string,
+    openOrders: OpenOrder[],
+    fetchedAt = nowMs(),
+  ): void {
     this.tokenState(tokenId).openOrders = [...openOrders];
+    this.tokenState(tokenId).openOrdersFetchedAt = fetchedAt;
   }
 
   recordPendingOrder(order: ProposedOrder): void {
@@ -163,7 +176,7 @@ class LiveMarketState {
   }
 
   private tokenState(tokenId: string): LiveTokenState {
-    const token = this.tokens.find((state) => state.tokenId === tokenId);
+    const token = this.stateForToken(tokenId);
     if (!token) {
       throw new Error(`missing live market state for token ${tokenId}`);
     }
@@ -175,7 +188,9 @@ interface LiveTokenState {
   tokenId: string;
   fairPrice: number;
   balance: number;
+  balanceFetchedAt: number;
   openOrders: OpenOrder[];
+  openOrdersFetchedAt: number;
 }
 
 export interface ProposedOrder {
@@ -658,10 +673,11 @@ async function quoteMarket(
     }
 
     const book = await publicClient.getOrderBook(tokenId);
+    const bookFetchedAt = nowMs();
     if (isShutdownRequested(shutdown)) {
       return;
     }
-    const tokenQuote = buildTokenQuote(market, token, book, config);
+    const tokenQuote = buildTokenQuote(market, token, book, bookFetchedAt, config);
     if (!tokenQuote.plan) {
       console.log(
         `skip ${marketSlug(market)} ${tokenOutcome(token)}: ` +
@@ -679,6 +695,11 @@ async function quoteMarket(
   }
   if (liveClient) {
     const marketState = await LiveMarketState.load(liveClient, tokenQuotes);
+    const staleReason = preflightStaleDataReason(tokenQuotes, marketState, nowMs(), config);
+    if (staleReason) {
+      console.log(`skip live quote ${marketSlug(market)}: stale live data (${staleReason})`);
+      return;
+    }
     for (const tokenQuote of tokenQuotes) {
       if (isShutdownRequested(shutdown)) {
         return;
@@ -702,6 +723,7 @@ function buildTokenQuote(
   market: Market,
   token: Token,
   book: OrderBookSummary,
+  bookFetchedAt: number,
   config: Config,
 ): TokenQuote {
   const bestBidPrice = bestBid(book.bids ?? []);
@@ -717,10 +739,11 @@ function buildTokenQuote(
     : undefined;
   const plan = liquiditySkip
     ? undefined
-    : buildQuotePlan(market, token, book, config);
+    : buildQuotePlan(market, token, book, config, bookFetchedAt);
   return {
     tokenId: tokenIdFromToken(token),
     fairPrice: fair,
+    bookFetchedAt,
     plan,
     skipReason: plan
       ? undefined
@@ -735,6 +758,7 @@ export function buildQuotePlan(
   token: Token,
   book: OrderBookSummary,
   config: Config,
+  bookFetchedAt = nowMs(),
 ): QuotePlan | undefined {
   const bestBidPrice = bestBid(book.bids ?? []);
   const bestAskPrice = bestAsk(book.asks ?? []);
@@ -806,6 +830,7 @@ export function buildQuotePlan(
     fairPrice: fair,
     bestBid: bestBidPrice,
     bestAsk: bestAskPrice,
+    bookFetchedAt,
     buyBand,
     sellBand,
   };
@@ -996,6 +1021,11 @@ async function reconcileQuotePlan(
   if (isShutdownRequested(shutdown)) {
     return;
   }
+  const staleReason = staleLiveDataReason(plan, marketState, nowMs(), config);
+  if (staleReason) {
+    console.log(`skip placing ${plan.marketSlug} ${plan.outcome}: stale live data (${staleReason})`);
+    return;
+  }
   let openOrders = marketState.openOrders(plan.tokenId);
   const ordersToCancel = cancellableOrders(openOrders, plan, config);
   if (config.cancelBeforeQuote && ordersToCancel.length > 0) {
@@ -1023,6 +1053,13 @@ async function reconcileQuotePlan(
   }
 
   if (isShutdownRequested(shutdown)) {
+    return;
+  }
+  const postCancelStaleReason = staleLiveDataReason(plan, marketState, nowMs(), config);
+  if (postCancelStaleReason) {
+    console.log(
+      `skip placing ${plan.marketSlug} ${plan.outcome}: stale live data (${postCancelStaleReason})`,
+    );
     return;
   }
   const remainingOrders = openOrders;
@@ -1211,6 +1248,83 @@ function applyPostResponse(
 
 function responseSuccess(response: OrderResponse): boolean {
   return response.success === true;
+}
+
+function staleLiveDataReason(
+  plan: QuotePlan,
+  marketState: LiveMarketState,
+  now: number,
+  config: Config,
+): string | undefined {
+  const tokenState = marketState.stateForToken(plan.tokenId);
+  if (!tokenState) {
+    return `missing live state for token ${plan.tokenId}`;
+  }
+  return (
+    staleInputReason("order book", plan.bookFetchedAt, now, config.maxDataAgeSecs) ||
+    staleInputReason(
+      "open orders",
+      tokenState.openOrdersFetchedAt,
+      now,
+      config.maxDataAgeSecs,
+    ) ||
+    staleInputReason(
+      "token balance",
+      tokenState.balanceFetchedAt,
+      now,
+      config.maxDataAgeSecs,
+    )
+  );
+}
+
+function preflightStaleDataReason(
+  tokenQuotes: TokenQuote[],
+  marketState: LiveMarketState,
+  now: number,
+  config: Config,
+): string | undefined {
+  for (const tokenQuote of tokenQuotes) {
+    const tokenState = marketState.stateForToken(tokenQuote.tokenId);
+    if (!tokenState) {
+      return `missing live state for token ${tokenQuote.tokenId}`;
+    }
+    const reason =
+      staleInputReason("order book", tokenQuote.bookFetchedAt, now, config.maxDataAgeSecs) ||
+      staleInputReason(
+        "open orders",
+        tokenState.openOrdersFetchedAt,
+        now,
+        config.maxDataAgeSecs,
+      ) ||
+      staleInputReason(
+        "token balance",
+        tokenState.balanceFetchedAt,
+        now,
+        config.maxDataAgeSecs,
+      );
+    if (reason) {
+      return `token ${tokenQuote.tokenId} ${reason}`;
+    }
+  }
+  return undefined;
+}
+
+export function staleInputReason(
+  inputName: string,
+  fetchedAt: number,
+  now: number,
+  maxAgeSecs: number,
+): string | undefined {
+  const ageMs = Math.max(now - fetchedAt, 0);
+  const maxAgeMs = maxAgeSecs * 1000;
+  if (ageMs <= maxAgeMs) {
+    return undefined;
+  }
+  return `${inputName} age ${Math.trunc(ageMs)}ms exceeds max ${Math.trunc(maxAgeMs)}ms`;
+}
+
+function nowMs(): number {
+  return Date.now();
 }
 
 async function openOrdersForToken(

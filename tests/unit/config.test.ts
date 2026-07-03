@@ -154,6 +154,9 @@ describe("config", () => {
         expect(() => parseConfig(["--clear-pause", "--cancel-all"], {})).toThrow(
             "MARKET_MAKER_CLEAR_PAUSE cannot be combined with cancel-all actions",
         );
+        expect(() => parseConfig(["--clear-pause", "--cancel-all-on-exit"], {})).toThrow(
+            "MARKET_MAKER_CLEAR_PAUSE cannot be combined with cancel-all actions",
+        );
     });
 
     it("allows clear-pause without live credentials or trading validations", () => {

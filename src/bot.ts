@@ -26,8 +26,11 @@ import {
 import { conditionIdFromMarket, conditionIdsFromSiteConfig } from "./event-scope.js";
 import { ceilToTick, fairPrice, floorToTick, isTradeablePrice } from "./pricing.js";
 import {
+  clearPauseState,
   loadSeenMarkets,
+  loadPauseState,
   markNew,
+  savePauseReason,
   saveSeenMarkets,
   type SeenMarkets,
 } from "./state.js";
@@ -431,6 +434,16 @@ interface CancelOpenOrdersSummary {
 }
 
 export async function run(config: Config): Promise<void> {
+  if (config.clearPause) {
+    const cleared = await clearPauseState(config.pausePath);
+    if (cleared) {
+      console.log(`cleared pause file ${config.pausePath}`);
+    } else {
+      console.log(`no pause file at ${config.pausePath}`);
+    }
+    return;
+  }
+
   const publicClient = new ClobClient(
     config.clobHost,
     (config.chainId ?? Chain.AMOY) as Chain,
@@ -523,6 +536,9 @@ async function runCycles(
     if (isShutdownRequested(shutdown)) {
       return;
     }
+    if (await stopIfPaused(config)) {
+      return;
+    }
     const eventSlug = config.eventSlug?.trim();
     let candidates: MarketCandidate[];
     if (eventSlug) {
@@ -575,6 +591,9 @@ async function runCycles(
         riskBudget,
         shutdown,
       );
+      if (await stopIfPaused(config)) {
+        return;
+      }
     }
 
     if (cycle < config.cycles) {
@@ -584,6 +603,31 @@ async function runCycles(
       await interruptibleSleep(config.refreshSecs * 1000, shutdown);
     }
   }
+}
+
+async function stopIfPaused(config: Config): Promise<boolean> {
+  const pause = await loadPauseState(config.pausePath);
+  if (!pause) {
+    return false;
+  }
+  console.log(`paused by ${config.pausePath}: ${pause.reason.trim()}`);
+  return true;
+}
+
+async function skipLiveActionIfPaused(
+  plan: QuotePlan,
+  config: Config,
+  action: string,
+): Promise<boolean> {
+  const pause = await loadPauseState(config.pausePath);
+  if (!pause) {
+    return false;
+  }
+  console.log(
+    `skip ${action} for ${plan.marketSlug} ${plan.outcome}: ` +
+      `pause active at ${config.pausePath} (${pause.reason.trim()})`,
+  );
+  return true;
 }
 
 function isShutdownRequested(shutdown: ShutdownState | undefined): boolean {
@@ -1146,6 +1190,12 @@ function riskBreachMessage(breach: RiskBreach): string {
   return `market buy collateral ${breach.value} exceeds limit ${breach.limit}`;
 }
 
+function riskBreachPauseReason(plan: QuotePlan, breaches: RiskBreach[]): string {
+  return `risk breach ${plan.marketSlug} ${plan.outcome}: ${breaches
+    .map(riskBreachMessage)
+    .join("; ")}`;
+}
+
 export function riskBreachAppliesToToken(
   breaches: RiskBreach[],
   tokenId: string,
@@ -1185,6 +1235,9 @@ async function reconcileQuotePlan(
   let openOrders = marketState.openOrders(plan.tokenId);
   const ordersToCancel = cancellableOrders(openOrders, plan, config);
   if (config.cancelBeforeQuote && ordersToCancel.length > 0) {
+    if (await skipLiveActionIfPaused(plan, config, "canceling stale orders")) {
+      return;
+    }
     const response = await client.cancelOrders(ordersToCancel.map((order) => order.id));
     const canceled = responseList(response, "canceled");
     const notCanceled = responseList(response, "not_canceled");
@@ -1235,6 +1288,7 @@ async function reconcileQuotePlan(
       const refreshedOrders = await cancelRiskIncreasingOrders(
         client,
         plan,
+        config,
         openOrders,
       );
       if (refreshedOrders) {
@@ -1246,6 +1300,11 @@ async function reconcileQuotePlan(
           marketBudget,
         );
       }
+    }
+    if (config.pauseOnRiskBreach) {
+      const reason = riskBreachPauseReason(plan, breaches);
+      await savePauseReason(config.pausePath, reason);
+      console.log(`wrote pause file ${config.pausePath}: ${reason}`);
     }
     return;
   }
@@ -1388,6 +1447,9 @@ async function reconcileQuotePlan(
   }
 
   if (plannedOrders.length === 0 || isShutdownRequested(shutdown)) {
+    return;
+  }
+  if (await skipLiveActionIfPaused(plan, config, "posting orders")) {
     return;
   }
   const responses: Array<[SubmittedOrder, OrderResponse]> = [];
@@ -1633,6 +1695,7 @@ export async function cancelOpenOrdersForMarkets(
 async function cancelRiskIncreasingOrders(
   client: ClobClient,
   plan: QuotePlan,
+  config: Config,
   openOrders: OpenOrder[],
 ): Promise<OpenOrder[] | undefined> {
   const orderIds = openOrders
@@ -1643,6 +1706,9 @@ async function cancelRiskIncreasingOrders(
     return undefined;
   }
 
+  if (await skipLiveActionIfPaused(plan, config, "canceling risk-increasing orders")) {
+    return undefined;
+  }
   const response = await client.cancelOrders(orderIds);
   const canceled = responseList(response, "canceled");
   const notCanceled = responseList(response, "not_canceled");

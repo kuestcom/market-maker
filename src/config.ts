@@ -32,6 +32,9 @@ export interface Config {
   cancelAll: boolean;
   cancelAllOnExit: boolean;
   cancelOnRiskBreach: boolean;
+  pauseOnRiskBreach: boolean;
+  clearPause: boolean;
+  pausePath: string;
   postOnly: boolean;
   requireTwoSidedLive: boolean;
   maxDataAgeSecs: number;
@@ -80,6 +83,9 @@ Options:
   --cancel-all                      MARKET_MAKER_CANCEL_ALL, default false
   --cancel-all-on-exit              MARKET_MAKER_CANCEL_ALL_ON_EXIT, default false
   --cancel-on-risk-breach           MARKET_MAKER_CANCEL_ON_RISK_BREACH, default false
+  --pause-on-risk-breach            MARKET_MAKER_PAUSE_ON_RISK_BREACH, default false
+  --clear-pause                     MARKET_MAKER_CLEAR_PAUSE, default false
+  --pause-path <path>               MARKET_MAKER_PAUSE_PATH, default state/paused.json
   --post-only                       MARKET_MAKER_POST_ONLY, default true
   --require-two-sided-live          MARKET_MAKER_REQUIRE_TWO_SIDED_LIVE, default true
   --max-data-age-secs <n>           MARKET_MAKER_MAX_DATA_AGE_SECS, default 10
@@ -128,6 +134,9 @@ const knownOptions = new Set([
   "cancel-all",
   "cancel-all-on-exit",
   "cancel-on-risk-breach",
+  "pause-on-risk-breach",
+  "clear-pause",
+  "pause-path",
   "post-only",
   "require-two-sided-live",
   "max-data-age-secs",
@@ -305,6 +314,26 @@ export function parseConfig(
       "MARKET_MAKER_CANCEL_ON_RISK_BREACH",
       false,
     ),
+    pauseOnRiskBreach: booleanArg(
+      args,
+      env,
+      "pause-on-risk-breach",
+      "MARKET_MAKER_PAUSE_ON_RISK_BREACH",
+      false,
+    ),
+    clearPause: booleanArg(
+      args,
+      env,
+      "clear-pause",
+      "MARKET_MAKER_CLEAR_PAUSE",
+      false,
+    ),
+    pausePath: optionalRawStringArg(
+      args,
+      env,
+      "pause-path",
+      "MARKET_MAKER_PAUSE_PATH",
+    ) ?? "state/paused.json",
     postOnly: booleanArg(
       args,
       env,
@@ -570,6 +599,17 @@ function parseNumber(value: string, name: string): number {
 }
 
 function validateConfig(config: Config): void {
+  if (config.pausePath.trim() === "") {
+    throw new Error("MARKET_MAKER_PAUSE_PATH cannot be empty");
+  }
+  if (config.clearPause && (config.cancelAll || config.cancelAllOnExit)) {
+    throw new Error(
+      "MARKET_MAKER_CLEAR_PAUSE cannot be combined with cancel-all actions",
+    );
+  }
+  if (config.clearPause) {
+    return;
+  }
   if (config.maxMarkets <= 0) {
     throw new Error("MARKET_MAKER_MAX_MARKETS must be greater than zero");
   }
@@ -667,6 +707,9 @@ function validateConfig(config: Config): void {
   }
   if (config.cancelOnRiskBreach && !config.live) {
     throw new Error("--cancel-on-risk-breach requires --live");
+  }
+  if (config.pauseOnRiskBreach && !config.live) {
+    throw new Error("--pause-on-risk-breach requires --live");
   }
   if (config.maxDataAgeSecs <= 0) {
     throw new Error("MARKET_MAKER_MAX_DATA_AGE_SECS must be greater than zero");

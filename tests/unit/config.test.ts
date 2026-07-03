@@ -23,6 +23,9 @@ describe("config", () => {
         expect(config.cancelAll).toBe(false);
         expect(config.cancelAllOnExit).toBe(false);
         expect(config.cancelOnRiskBreach).toBe(false);
+        expect(config.pauseOnRiskBreach).toBe(false);
+        expect(config.clearPause).toBe(false);
+        expect(config.pausePath).toBe("state/paused.json");
         expect(config.maxDataAgeSecs).toBe(10);
     });
 
@@ -127,6 +130,36 @@ describe("config", () => {
         expect(() => parseConfig(["--cancel-on-risk-breach"], {})).toThrow(
             "--cancel-on-risk-breach requires --live",
         );
+    });
+
+    it("rejects pause-on-risk-breach without live mode", () => {
+        expect(() => parseConfig(["--pause-on-risk-breach"], {})).toThrow(
+            "--pause-on-risk-breach requires --live",
+        );
+    });
+
+    it("rejects empty pause path", () => {
+        expect(() => parseConfig(["--pause-path", "  "], {})).toThrow(
+            "MARKET_MAKER_PAUSE_PATH",
+        );
+    });
+
+    it("rejects pause path without a value", () => {
+        expect(() => parseConfig(["--pause-path"], {})).toThrow(
+            "MARKET_MAKER_PAUSE_PATH requires a value",
+        );
+    });
+
+    it("rejects clear-pause combined with cancel-all actions", () => {
+        expect(() => parseConfig(["--clear-pause", "--cancel-all"], {})).toThrow(
+            "MARKET_MAKER_CLEAR_PAUSE cannot be combined with cancel-all actions",
+        );
+    });
+
+    it("allows clear-pause without live credentials or trading validations", () => {
+        const config = parseConfig(["--clear-pause", "--max-markets", "0"], {});
+
+        expect(config.clearPause).toBe(true);
     });
 
     it("rejects non-positive max data age", () => {

@@ -1717,14 +1717,14 @@ async function reconcileQuotePlan(
   if (plannedOrders.length === 0 || isShutdownRequested(shutdown)) {
     return;
   }
+  if (await skipLiveActionIfPaused(plan, config, "posting orders")) {
+    return;
+  }
   const moveReason = await prePostMoveRejectReason(publicClient, plan, config);
   if (moveReason) {
     console.log(
       `skip posting ${plan.marketSlug} ${plan.outcome}: pre-post price movement (${moveReason})`,
     );
-    return;
-  }
-  if (await skipLiveActionIfPaused(plan, config, "posting orders")) {
     return;
   }
   const responses: Array<[SubmittedOrder, OrderResponse]> = [];

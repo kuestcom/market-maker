@@ -3,10 +3,13 @@ import {
     RiskBudget,
     affordableBuySize,
     buildQuotePlan,
+    cancellableOrders,
+    isOpenOrder,
+    type QuotePlan,
     selectEventCandidates,
 } from "../../src/bot.js";
 import type { Config } from "../../src/config.js";
-import type { OrderBookSummary } from "../../vendor/clob-client/dist/types.js";
+import { Side, type OpenOrder, type OrderBookSummary } from "../../vendor/clob-client/dist/types.js";
 
 describe("bot feature #1", () => {
     it("marks event candidates as already scoped instead of new", () => {
@@ -45,6 +48,22 @@ describe("bot feature #1", () => {
         expect(affordableBuySize(5, 0.5, 1, globalBudget, marketBudget)).toBe(2);
         expect(globalBudget.remainingCollateral()).toBe(10);
         expect(marketBudget.remainingCollateral()).toBe(10);
+    });
+
+    it("trims only enough same-price size above the target", () => {
+        const orders = [
+            openOrder("oldest", Side.BUY, "0.49", "3", 1),
+            openOrder("middle", Side.BUY, "0.49", "3", 2),
+            openOrder("newest", Side.BUY, "0.49", "3", 3),
+        ];
+
+        const canceled = cancellableOrders(orders, plan(), config());
+
+        expect(canceled.map(order => order.id)).toEqual(["newest", "middle"]);
+    });
+
+    it("keeps documented OPEN status in reconciliation", () => {
+        expect(isOpenOrder(openOrder("open", Side.BUY, "0.49", "1", 1, "OPEN"))).toBe(true);
     });
 });
 
@@ -104,5 +123,47 @@ function config(): Config {
         cycles: 1,
         refreshSecs: 30,
         statePath: "state/seen-markets.json",
+    };
+}
+
+function plan(): QuotePlan {
+    return {
+        marketKey: "market",
+        marketSlug: "market",
+        question: "Question?",
+        tokenId: "yes",
+        outcome: "Yes",
+        fairPrice: 0.5,
+        bestBid: 0.49,
+        bestAsk: 0.51,
+        buyPrice: 0.49,
+        size: 5,
+    };
+}
+
+function openOrder(
+    id: string,
+    side: Side,
+    price: string,
+    size: string,
+    createdAt: number,
+    status = "OPEN",
+): OpenOrder {
+    return {
+        id,
+        status,
+        owner: "owner",
+        maker_address: "maker",
+        market: "market",
+        asset_id: "yes",
+        side,
+        original_size: size,
+        size_matched: "0",
+        price,
+        associate_trades: [],
+        outcome: "Yes",
+        created_at: createdAt,
+        expiration: "0",
+        order_type: "GTC",
     };
 }

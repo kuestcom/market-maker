@@ -39,7 +39,7 @@ interface MarketCandidate {
   isNew: boolean;
 }
 
-interface QuotePlan {
+export interface QuotePlan {
   marketKey: string;
   marketSlug: string;
   question: string;
@@ -636,7 +636,7 @@ async function conditionalBalance(client: ClobClient, tokenId: string): Promise<
   return numberOrDefault(response.balance, 0) / CONDITIONAL_TOKEN_BASE_UNITS;
 }
 
-function cancellableOrders(
+export function cancellableOrders(
   openOrders: OpenOrder[],
   plan: QuotePlan,
   config: Config,
@@ -671,11 +671,22 @@ function cancellableOrders(
       (total, order) => total + openOrderRemainingSize(order),
       0,
     );
-    if (matchingSize > plan.size) {
-      for (const order of matchingOrders) {
+    let remainingMatchingSize = matchingSize;
+    if (remainingMatchingSize > plan.size) {
+      const leastCompetitiveQueue = [...matchingOrders].sort(
+        (left, right) => right.created_at - left.created_at,
+      );
+      for (const order of leastCompetitiveQueue) {
+        if (remainingMatchingSize <= plan.size) {
+          break;
+        }
         if (!cancellableIds.has(order.id)) {
           cancellableIds.add(order.id);
           cancellable.push(order);
+          remainingMatchingSize = Math.max(
+            remainingMatchingSize - openOrderRemainingSize(order),
+            0,
+          );
         }
       }
     }
@@ -727,8 +738,10 @@ function openOrderRemainingSize(order: OpenOrder): number {
   );
 }
 
-function isOpenOrder(order: OpenOrder): boolean {
-  return ["live", "unmatched", "delayed"].includes(order.status.toLowerCase());
+export function isOpenOrder(order: OpenOrder): boolean {
+  return ["live", "open", "unmatched", "delayed"].includes(
+    order.status.toLowerCase(),
+  );
 }
 
 function printPostResponses(

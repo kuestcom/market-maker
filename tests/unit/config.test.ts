@@ -21,6 +21,12 @@ describe("config", () => {
         );
     });
 
+    it("rejects event slug without a value", () => {
+        expect(() => parseConfig(["--event-slug"], {})).toThrow(
+            "MARKET_MAKER_EVENT_SLUG requires a value",
+        );
+    });
+
     it("rejects invalid price range", () => {
         expect(() =>
             parseConfig(["--min-price", "0.60", "--max-price", "0.40"], {}),
@@ -30,6 +36,12 @@ describe("config", () => {
     it("rejects zero open order limit", () => {
         expect(() => parseConfig(["--max-open-orders-per-token", "0"], {})).toThrow(
             "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN",
+        );
+    });
+
+    it("rejects fractional open order limit", () => {
+        expect(() => parseConfig(["--max-open-orders-per-token", "1.5"], {})).toThrow(
+            "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN must be a positive integer",
         );
     });
 });

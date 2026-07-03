@@ -337,6 +337,9 @@ function optionalRawStringArg(
   if (value === undefined || value === false) {
     return undefined;
   }
+  if (value === true) {
+    throw new Error(`${envKey} requires a value`);
+  }
   return String(value);
 }
 
@@ -463,9 +466,12 @@ function validateConfig(config: Config): void {
   if (config.minFreeCollateral < 0) {
     throw new Error("MARKET_MAKER_MIN_FREE_COLLATERAL cannot be negative");
   }
-  if (config.maxOpenOrdersPerToken <= 0) {
+  if (
+    !Number.isInteger(config.maxOpenOrdersPerToken) ||
+    config.maxOpenOrdersPerToken <= 0
+  ) {
     throw new Error(
-      "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN must be greater than zero",
+      "MARKET_MAKER_MAX_OPEN_ORDERS_PER_TOKEN must be a positive integer",
     );
   }
   if (config.cycles <= 0) {

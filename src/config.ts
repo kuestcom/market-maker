@@ -17,6 +17,12 @@ export interface Config {
   orderSize: number;
   edgeTicks: number;
   minSpreadTicks: number;
+  bandMinMarginTicks?: number;
+  bandAvgMarginTicks?: number;
+  bandMaxMarginTicks?: number;
+  bandMinSize?: number;
+  bandAvgSize?: number;
+  bandMaxSize?: number;
   maxBookSpreadTicks: number;
   minTopDepth: number;
   quoteSides: QuoteSides;
@@ -53,6 +59,12 @@ Options:
   --order-size <n>                  MARKET_MAKER_ORDER_SIZE, default 5
   --edge-ticks <n>                  MARKET_MAKER_EDGE_TICKS, default 1
   --min-spread-ticks <n>            MARKET_MAKER_MIN_SPREAD_TICKS, default 2
+  --band-min-margin-ticks <n>       MARKET_MAKER_BAND_MIN_MARGIN_TICKS, optional
+  --band-avg-margin-ticks <n>       MARKET_MAKER_BAND_AVG_MARGIN_TICKS, optional
+  --band-max-margin-ticks <n>       MARKET_MAKER_BAND_MAX_MARGIN_TICKS, optional
+  --band-min-size <n>               MARKET_MAKER_BAND_MIN_SIZE, optional
+  --band-avg-size <n>               MARKET_MAKER_BAND_AVG_SIZE, optional
+  --band-max-size <n>               MARKET_MAKER_BAND_MAX_SIZE, optional
   --max-book-spread-ticks <n>       MARKET_MAKER_MAX_BOOK_SPREAD_TICKS, default 20
   --min-top-depth <n>               MARKET_MAKER_MIN_TOP_DEPTH, default 5
   --quote-sides <side>              MARKET_MAKER_QUOTE_SIDES, buy | sell | both
@@ -89,6 +101,12 @@ const knownOptions = new Set([
   "order-size",
   "edge-ticks",
   "min-spread-ticks",
+  "band-min-margin-ticks",
+  "band-avg-margin-ticks",
+  "band-max-margin-ticks",
+  "band-min-size",
+  "band-avg-size",
+  "band-max-size",
   "max-book-spread-ticks",
   "min-top-depth",
   "quote-sides",
@@ -168,6 +186,42 @@ export function parseConfig(
       "min-spread-ticks",
       "MARKET_MAKER_MIN_SPREAD_TICKS",
       2,
+    ),
+    bandMinMarginTicks: optionalNumberArg(
+      args,
+      env,
+      "band-min-margin-ticks",
+      "MARKET_MAKER_BAND_MIN_MARGIN_TICKS",
+    ),
+    bandAvgMarginTicks: optionalNumberArg(
+      args,
+      env,
+      "band-avg-margin-ticks",
+      "MARKET_MAKER_BAND_AVG_MARGIN_TICKS",
+    ),
+    bandMaxMarginTicks: optionalNumberArg(
+      args,
+      env,
+      "band-max-margin-ticks",
+      "MARKET_MAKER_BAND_MAX_MARGIN_TICKS",
+    ),
+    bandMinSize: optionalNumberArg(
+      args,
+      env,
+      "band-min-size",
+      "MARKET_MAKER_BAND_MIN_SIZE",
+    ),
+    bandAvgSize: optionalNumberArg(
+      args,
+      env,
+      "band-avg-size",
+      "MARKET_MAKER_BAND_AVG_SIZE",
+    ),
+    bandMaxSize: optionalNumberArg(
+      args,
+      env,
+      "band-max-size",
+      "MARKET_MAKER_BAND_MAX_SIZE",
     ),
     maxBookSpreadTicks: numberArg(
       args,
@@ -471,6 +525,27 @@ function validateConfig(config: Config): void {
   if (config.minSpreadTicks <= 0) {
     throw new Error("MARKET_MAKER_MIN_SPREAD_TICKS must be greater than zero");
   }
+  const [bandMinMargin, bandAvgMargin, bandMaxMargin] = bandMarginTicks(config);
+  if (bandMinMargin <= 0 || bandAvgMargin <= 0 || bandMaxMargin <= 0) {
+    throw new Error("MARKET_MAKER_BAND_*_MARGIN_TICKS must be greater than zero");
+  }
+  if (bandMinMargin > bandAvgMargin || bandAvgMargin > bandMaxMargin) {
+    throw new Error("MARKET_MAKER_BAND_*_MARGIN_TICKS must satisfy min <= avg <= max");
+  }
+  if (bandMinMargin >= bandMaxMargin) {
+    throw new Error(
+      "MARKET_MAKER_BAND_MAX_MARGIN_TICKS must be greater than MARKET_MAKER_BAND_MIN_MARGIN_TICKS",
+    );
+  }
+  const [bandMinSize, bandAvgSize, bandMaxSize] = bandSizes(config);
+  if (bandMinSize < 0 || bandAvgSize <= 0 || bandMaxSize <= 0) {
+    throw new Error(
+      "MARKET_MAKER_BAND_*_SIZE must be non-negative with avg and max greater than zero",
+    );
+  }
+  if (bandMinSize > bandAvgSize || bandAvgSize > bandMaxSize) {
+    throw new Error("MARKET_MAKER_BAND_*_SIZE must satisfy min <= avg <= max");
+  }
   if (config.maxBookSpreadTicks <= 0) {
     throw new Error("MARKET_MAKER_MAX_BOOK_SPREAD_TICKS must be greater than zero");
   }
@@ -535,4 +610,18 @@ function validateConfig(config: Config): void {
       `unsupported chain id ${config.chainId}; SDK supports ${POLYGON} and ${AMOY}`,
     );
   }
+}
+
+export function bandMarginTicks(config: Config): [number, number, number] {
+  const minMargin = config.bandMinMarginTicks ?? config.edgeTicks;
+  const avgMargin = config.bandAvgMarginTicks ?? minMargin;
+  const maxMargin = config.bandMaxMarginTicks ?? minMargin + config.minSpreadTicks;
+  return [minMargin, avgMargin, maxMargin];
+}
+
+export function bandSizes(config: Config): [number, number, number] {
+  const minSize = config.bandMinSize ?? config.orderSize;
+  const avgSize = config.bandAvgSize ?? Math.max(config.orderSize, minSize);
+  const maxSize = config.bandMaxSize ?? Math.max(avgSize, minSize);
+  return [minSize, avgSize, maxSize];
 }

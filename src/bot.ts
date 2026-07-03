@@ -16,13 +16,15 @@ import {
   Side,
 } from "../vendor/clob-client/dist/types.js";
 import {
+  bandMarginTicks,
+  bandSizes,
   type Config,
   type DiscoveryMode,
   includesBuy,
   includesSell,
 } from "./config.js";
 import { conditionIdFromMarket, conditionIdsFromSiteConfig } from "./event-scope.js";
-import { fairPrice, quotePrices } from "./pricing.js";
+import { ceilToTick, fairPrice, floorToTick, isTradeablePrice } from "./pricing.js";
 import {
   loadSeenMarkets,
   markNew,
@@ -48,9 +50,18 @@ export interface QuotePlan {
   fairPrice: number;
   bestBid?: number;
   bestAsk?: number;
-  buyPrice?: number;
-  sellPrice?: number;
-  size: number;
+  buyBand?: QuoteBand;
+  sellBand?: QuoteBand;
+}
+
+export interface QuoteBand {
+  side: Side;
+  price: number;
+  minPrice: number;
+  maxPrice: number;
+  minSize: number;
+  avgSize: number;
+  maxSize: number;
 }
 
 interface TokenQuote {
@@ -558,43 +569,43 @@ export function buildQuotePlan(
     return undefined;
   }
   const tick = numberOrDefault(book.tick_size, 0.01);
-  let [buyPrice, sellPrice] = quotePrices(
-    fair,
-    bestBidPrice,
-    bestAskPrice,
-    tick,
-    config.edgeTicks,
-    config.minSpreadTicks,
-  );
-
-  if (buyPrice !== undefined && !priceInConfiguredRange(buyPrice, config)) {
-    buyPrice = undefined;
-  }
-  if (sellPrice !== undefined && !priceInConfiguredRange(sellPrice, config)) {
-    sellPrice = undefined;
-  }
-
-  if (!includesBuy(config.quoteSides)) {
-    buyPrice = undefined;
-  }
-  if (!includesSell(config.quoteSides)) {
-    sellPrice = undefined;
-  }
+  let buyBand = includesBuy(config.quoteSides)
+    ? buildQuoteBand(
+        market,
+        Side.BUY,
+        fair,
+        bestBidPrice,
+        bestAskPrice,
+        tick,
+        config,
+      )
+    : undefined;
+  let sellBand = includesSell(config.quoteSides)
+    ? buildQuoteBand(
+        market,
+        Side.SELL,
+        fair,
+        bestBidPrice,
+        bestAskPrice,
+        tick,
+        config,
+      )
+    : undefined;
   if (
     !config.allowSingleSided &&
-    (buyPrice === undefined || sellPrice === undefined)
+    (buyBand === undefined || sellBand === undefined)
   ) {
     return undefined;
   }
   if (
-    buyPrice !== undefined &&
-    sellPrice !== undefined &&
-    buyPrice >= sellPrice
+    buyBand !== undefined &&
+    sellBand !== undefined &&
+    sellBand.price - buyBand.price < tick * config.minSpreadTicks
   ) {
-    buyPrice = undefined;
-    sellPrice = undefined;
+    buyBand = undefined;
+    sellBand = undefined;
   }
-  if (buyPrice === undefined && sellPrice === undefined) {
+  if (buyBand === undefined && sellBand === undefined) {
     return undefined;
   }
 
@@ -607,15 +618,71 @@ export function buildQuotePlan(
     fairPrice: fair,
     bestBid: bestBidPrice,
     bestAsk: bestAskPrice,
-    buyPrice,
-    sellPrice,
-    size: orderSize(market, config),
+    buyBand,
+    sellBand,
   };
 }
 
-export function orderSize(market: Market, config: Config): number {
+function buildQuoteBand(
+  market: Market,
+  side: Side,
+  fair: number,
+  bestBidPrice: number | undefined,
+  bestAskPrice: number | undefined,
+  tick: number,
+  config: Config,
+): QuoteBand | undefined {
+  if (tick <= 0) {
+    return undefined;
+  }
+
+  const [minMarginTicks, avgMarginTicks, maxMarginTicks] = bandMarginTicks(config);
+  const [minSize, avgSize, maxSize] = bandSizes(config);
+  const minMargin = tick * minMarginTicks;
+  const avgMargin = tick * avgMarginTicks;
+  const maxMargin = tick * maxMarginTicks;
+  const [price, rawMinPrice, rawMaxPrice] =
+    side === Side.BUY
+      ? [
+          floorToTick(fair - avgMargin, tick),
+          floorToTick(fair - maxMargin, tick),
+          floorToTick(fair - minMargin, tick),
+        ]
+      : [
+          ceilToTick(fair + avgMargin, tick),
+          ceilToTick(fair + minMargin, tick),
+          ceilToTick(fair + maxMargin, tick),
+        ];
+  const minPrice = Math.max(Math.max(rawMinPrice, tick), config.minPrice);
+  const maxPrice = Math.min(Math.min(rawMaxPrice, 1 - tick), config.maxPrice);
+
+  if (!isTradeablePrice(price, tick) || !priceInConfiguredRange(price, config)) {
+    return undefined;
+  }
+  if (minPrice > maxPrice) {
+    return undefined;
+  }
+  if (side === Side.BUY && bestAskPrice !== undefined && price >= bestAskPrice) {
+    return undefined;
+  }
+  if (side === Side.SELL && bestBidPrice !== undefined && price <= bestBidPrice) {
+    return undefined;
+  }
+
+  return {
+    side,
+    price,
+    minPrice,
+    maxPrice,
+    minSize: orderSize(market, minSize, config),
+    avgSize: orderSize(market, avgSize, config),
+    maxSize: orderSize(market, maxSize, config),
+  };
+}
+
+export function orderSize(market: Market, requestedSize: number, config: Config): number {
   let size = Math.max(
-    config.orderSize,
+    requestedSize,
     numberOrDefault(field(market, "minimum_order_size"), 0),
   );
   if (config.respectRewardMinSize) {
@@ -715,7 +782,17 @@ function printPlan(plan: QuotePlan, live: boolean): void {
   console.log(
     `${mode}: ${plan.marketKey} :: ${plan.marketSlug} :: ${plan.question} :: ${plan.outcome} ` +
       `(${plan.tokenId}) fair=${plan.fairPrice} bid=${plan.bestBid} ask=${plan.bestAsk} ` +
-      `buy=${plan.buyPrice} sell=${plan.sellPrice} size=${plan.size}`,
+      `buy=${formatBand(plan.buyBand)} sell=${formatBand(plan.sellBand)}`,
+  );
+}
+
+function formatBand(band: QuoteBand | undefined): string {
+  if (!band) {
+    return "none";
+  }
+  return (
+    `price=${band.price} band=[${band.minPrice}, ${band.maxPrice}] ` +
+    `size=${band.minSize}/${band.avgSize}/${band.maxSize}`
   );
 }
 
@@ -775,14 +852,14 @@ async function reconcileQuotePlan(
   );
 
   const responses: Array<[Side, OrderResponse]> = [];
-  if (plan.buyPrice !== undefined) {
+  if (plan.buyBand !== undefined) {
     if (newOrderSlots > 0) {
-      const openSize = matchingOpenSize(remainingOrders, Side.BUY, plan.buyPrice);
-      if (openSize < plan.size) {
-        const missingSize = plan.size - openSize;
+      const openSize = bandOpenSize(remainingOrders, plan.buyBand);
+      const missingSize = bandMissingSize(plan.buyBand, openSize);
+      if (missingSize !== undefined) {
         const decision = buyTopUpDecision(
           missingSize,
-          plan.buyPrice,
+          plan.buyBand.price,
           freeCollateral,
           globalBudget,
           marketBudget,
@@ -791,13 +868,13 @@ async function reconcileQuotePlan(
           const proposedOrder = {
             tokenId: plan.tokenId,
             side: Side.BUY,
-            price: plan.buyPrice,
+            price: plan.buyBand.price,
             size: decision.size,
           };
           if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
             const order = await client.createOrder({
               tokenID: plan.tokenId,
-              price: plan.buyPrice,
+              price: plan.buyBand.price,
               size: decision.size,
               side: Side.BUY,
             });
@@ -812,28 +889,28 @@ async function reconcileQuotePlan(
         } else {
           console.log(
             `skip ${plan.marketSlug} ${plan.outcome} buy: ` +
-              `risk budget/free collateral leaves size ${decision.affordableSize} below required ${missingSize}`,
+              `risk budget/free collateral leaves size ${decision.affordableSize} below band target ${missingSize}`,
           );
         }
       }
     }
   }
-  if (plan.sellPrice !== undefined && newOrderSlots > 0) {
-    const openSize = matchingOpenSize(remainingOrders, Side.SELL, plan.sellPrice);
-    if (openSize < plan.size) {
-      const missingSize = plan.size - openSize;
+  if (plan.sellBand !== undefined && newOrderSlots > 0) {
+    const openSize = bandOpenSize(remainingOrders, plan.sellBand);
+    const missingSize = bandMissingSize(plan.sellBand, openSize);
+    if (missingSize !== undefined) {
       const size = Math.min(missingSize, freeTokens);
       if (size >= missingSize) {
         const proposedOrder = {
           tokenId: plan.tokenId,
           side: Side.SELL,
-          price: plan.sellPrice,
+          price: plan.sellBand.price,
           size,
         };
         if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
           const order = await client.createOrder({
             tokenID: plan.tokenId,
-            price: plan.sellPrice,
+            price: plan.sellBand.price,
             size,
             side: Side.SELL,
           });
@@ -846,7 +923,7 @@ async function reconcileQuotePlan(
       } else {
         console.log(
           `skip ${plan.marketSlug} ${plan.outcome} sell: ` +
-            `free token balance leaves size ${size} below required ${missingSize}`,
+            `free token balance leaves size ${size} below band target ${missingSize}`,
         );
       }
     }
@@ -1014,37 +1091,31 @@ export function cancellableOrders(
     }
   }
 
-  for (const [side, targetPrice] of [
-    [Side.BUY, plan.buyPrice],
-    [Side.SELL, plan.sellPrice],
-  ] as const) {
-    if (targetPrice === undefined) {
-      continue;
-    }
+  for (const band of planBands(plan)) {
     const matchingOrders = openOrders.filter(
       (order) =>
-        !cancellableIds.has(order.id) &&
-        order.side === side &&
-        numberOrDefault(order.price, 0) === targetPrice,
+        !cancellableIds.has(order.id) && bandIncludesOrder(band, order),
     );
     const matchingSize = matchingOrders.reduce(
       (total, order) => total + openOrderRemainingSize(order),
       0,
     );
-    let remainingMatchingSize = matchingSize;
-    if (remainingMatchingSize > plan.size) {
-      const leastCompetitiveQueue = [...matchingOrders].sort(
-        (left, right) => right.created_at - left.created_at,
+    let bandAmount = matchingSize;
+    if (bandAmount > band.maxSize) {
+      const excessiveOrders = [...matchingOrders].sort(
+        (left, right) =>
+          cancelPriority(band, left) - cancelPriority(band, right) ||
+          right.created_at - left.created_at,
       );
-      for (const order of leastCompetitiveQueue) {
-        if (remainingMatchingSize <= plan.size) {
+      for (const order of excessiveOrders) {
+        if (bandAmount <= band.avgSize) {
           break;
         }
         if (!cancellableIds.has(order.id)) {
           cancellableIds.add(order.id);
           cancellable.push(order);
-          remainingMatchingSize = Math.max(
-            remainingMatchingSize - openOrderRemainingSize(order),
+          bandAmount = Math.max(
+            bandAmount - openOrderRemainingSize(order),
             0,
           );
         }
@@ -1072,22 +1143,50 @@ function orderShouldCancel(order: OpenOrder, plan: QuotePlan): boolean {
     return true;
   }
   if (order.side === Side.BUY) {
-    return plan.buyPrice !== numberOrDefault(order.price, 0);
+    return !plan.buyBand || !bandIncludesOrder(plan.buyBand, order);
   }
   if (order.side === Side.SELL) {
-    return plan.sellPrice !== numberOrDefault(order.price, 0);
+    return !plan.sellBand || !bandIncludesOrder(plan.sellBand, order);
   }
   return true;
 }
 
-function matchingOpenSize(
-  orders: OpenOrder[],
-  side: Side,
-  price: number,
-): number {
+function planBands(plan: QuotePlan): QuoteBand[] {
+  return [plan.buyBand, plan.sellBand].filter(
+    (band): band is QuoteBand => band !== undefined,
+  );
+}
+
+export function bandContainsPrice(band: QuoteBand, price: number): boolean {
+  return price >= band.minPrice && price <= band.maxPrice;
+}
+
+function bandIncludesOrder(band: QuoteBand, order: OpenOrder): boolean {
+  return order.side === band.side && bandContainsPrice(band, numberOrDefault(order.price, 0));
+}
+
+function cancelPriority(band: QuoteBand, order: OpenOrder): number {
+  const price = numberOrDefault(order.price, 0);
+  if (band.side === Side.BUY) {
+    return Math.max(band.maxPrice - price, 0);
+  }
+  if (band.side === Side.SELL) {
+    return Math.max(price - band.minPrice, 0);
+  }
+  return 0;
+}
+
+function bandOpenSize(orders: OpenOrder[], band: QuoteBand): number {
   return orders
-    .filter((order) => order.side === side && numberOrDefault(order.price, 0) === price)
+    .filter((order) => bandIncludesOrder(band, order))
     .reduce((total, order) => total + openOrderRemainingSize(order), 0);
+}
+
+export function bandMissingSize(
+  band: Pick<QuoteBand, "minSize" | "avgSize">,
+  openSize: number,
+): number | undefined {
+  return openSize < band.minSize ? Math.max(band.avgSize - openSize, 0) : undefined;
 }
 
 function openOrderRemainingSize(order: OpenOrder): number {

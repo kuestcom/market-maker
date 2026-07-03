@@ -82,7 +82,7 @@ interface ShutdownState {
 class LiveMarketState {
   constructor(
     private readonly tokens: LiveTokenState[],
-    private readonly pendingOrders: ProposedOrder[] = [],
+    private pendingOrders: ProposedOrder[] = [],
   ) {}
 
   static async load(
@@ -117,8 +117,23 @@ class LiveMarketState {
     this.pendingOrders.push(order);
   }
 
-  projectedLoss(order: ProposedOrder): number {
+  removePendingOrdersNowOpen(refreshedOpenOrders: OpenOrder[]): void {
+    if (this.pendingOrders.length === 0) {
+      return;
+    }
+    this.pendingOrders = this.pendingOrders.filter(
+      (pendingOrder) =>
+        !refreshedOpenOrders.some((openOrder) =>
+          openOrderMatchesProposed(openOrder, pendingOrder),
+        ),
+    );
+  }
+
+  projectedLoss(order: ProposedOrder, stagedOrders: ProposedOrder[] = []): number {
     const exposure = this.exposure();
+    for (const stagedOrder of stagedOrders) {
+      exposure.applyKnownOrder(stagedOrder);
+    }
     exposure.applyOrder(order);
     return exposure.worstLoss();
   }
@@ -163,11 +178,18 @@ interface LiveTokenState {
   openOrders: OpenOrder[];
 }
 
-interface ProposedOrder {
+export interface ProposedOrder {
   tokenId: string;
   side: Side;
   price: number;
   size: number;
+}
+
+interface SubmittedOrder {
+  side: Side;
+  proposedOrder: ProposedOrder;
+  order: Awaited<ReturnType<ClobClient["createOrder"]>>;
+  collateral: number;
 }
 
 interface OutcomeExposure {
@@ -974,7 +996,7 @@ async function reconcileQuotePlan(
   if (isShutdownRequested(shutdown)) {
     return;
   }
-  const openOrders = marketState.openOrders(plan.tokenId);
+  let openOrders = marketState.openOrders(plan.tokenId);
   const ordersToCancel = cancellableOrders(openOrders, plan, config);
   if (config.cancelBeforeQuote && ordersToCancel.length > 0) {
     const response = await client.cancelOrders(ordersToCancel.map((order) => order.id));
@@ -989,13 +1011,21 @@ async function reconcileQuotePlan(
       );
       return;
     }
+    const canceledIds = new Set(ordersToCancel.map((order) => order.id));
+    openOrders = await openOrdersForToken(client, plan.tokenId);
+    marketState.replaceOpenOrders(plan.tokenId, openOrders);
+    if (openOrders.some((order) => canceledIds.has(order.id))) {
+      console.log(
+        `skip placing ${plan.marketSlug} ${plan.outcome}: canceled order state is still unstable`,
+      );
+      return;
+    }
   }
 
   if (isShutdownRequested(shutdown)) {
     return;
   }
-  const canceledIds = new Set(ordersToCancel.map((order) => order.id));
-  const remainingOrders = openOrders.filter((order) => !canceledIds.has(order.id));
+  const remainingOrders = openOrders;
   marketState.replaceOpenOrders(plan.tokenId, remainingOrders);
   for (const order of remainingOrders) {
     globalBudget.reserveOpenBuyOrder(order);
@@ -1024,7 +1054,7 @@ async function reconcileQuotePlan(
     0,
   );
 
-  const responses: Array<[Side, OrderResponse]> = [];
+  const plannedOrders: SubmittedOrder[] = [];
   if (plan.buyBand !== undefined) {
     if (newOrderSlots > 0) {
       const openSize = bandOpenSize(remainingOrders, plan.buyBand);
@@ -1043,26 +1073,27 @@ async function reconcileQuotePlan(
             side: Side.BUY,
             price: plan.buyBand.price,
             size: decision.size,
-        };
-        if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
-          if (isShutdownRequested(shutdown)) {
-            return;
-          }
-          const order = await client.createOrder({
-            tokenID: plan.tokenId,
-            price: plan.buyBand.price,
-            size: decision.size,
-            side: Side.BUY,
-          });
-          if (isShutdownRequested(shutdown)) {
-            return;
-          }
-          reserveBuyCollateral(decision.collateral, globalBudget, marketBudget);
-          marketState.recordPendingOrder(proposedOrder);
-            responses.push([
-              Side.BUY,
-              await client.postOrder(order, OrderType.GTC, false, config.postOnly),
-            ]);
+          };
+          const stagedOrders = plannedOrders.map((order) => order.proposedOrder);
+          if (!marketLossExceedsCap(plan, proposedOrder, marketState, config, stagedOrders)) {
+            if (isShutdownRequested(shutdown)) {
+              return;
+            }
+            const order = await client.createOrder({
+              tokenID: plan.tokenId,
+              price: plan.buyBand.price,
+              size: decision.size,
+              side: Side.BUY,
+            });
+            if (isShutdownRequested(shutdown)) {
+              return;
+            }
+            plannedOrders.push({
+              side: Side.BUY,
+              proposedOrder,
+              order,
+              collateral: decision.collateral,
+            });
             newOrderSlots -= 1;
           }
         } else {
@@ -1086,7 +1117,8 @@ async function reconcileQuotePlan(
           price: plan.sellBand.price,
           size,
         };
-        if (!marketLossExceedsCap(plan, proposedOrder, marketState, config)) {
+        const stagedOrders = plannedOrders.map((order) => order.proposedOrder);
+        if (!marketLossExceedsCap(plan, proposedOrder, marketState, config, stagedOrders)) {
           if (isShutdownRequested(shutdown)) {
             return;
           }
@@ -1099,11 +1131,12 @@ async function reconcileQuotePlan(
           if (isShutdownRequested(shutdown)) {
             return;
           }
-          marketState.recordPendingOrder(proposedOrder);
-          responses.push([
-            Side.SELL,
-            await client.postOrder(order, OrderType.GTC, false, config.postOnly),
-          ]);
+          plannedOrders.push({
+            side: Side.SELL,
+            proposedOrder,
+            order,
+            collateral: 0,
+          });
         }
       } else {
         console.log(
@@ -1114,10 +1147,70 @@ async function reconcileQuotePlan(
     }
   }
 
-  if (responses.length === 0) {
+  if (plannedOrders.length === 0 || isShutdownRequested(shutdown)) {
     return;
   }
+  const responses: Array<[SubmittedOrder, OrderResponse]> = [];
+  for (const plannedOrder of plannedOrders) {
+    responses.push([
+      plannedOrder,
+      await client.postOrder(plannedOrder.order, OrderType.GTC, false, config.postOnly),
+    ]);
+  }
   printPostResponses(plan, responses);
+  await applyPostResponses(client, plan, responses, marketState, globalBudget, marketBudget);
+}
+
+async function applyPostResponses(
+  client: ClobClient,
+  plan: QuotePlan,
+  responses: Array<[SubmittedOrder, OrderResponse]>,
+  marketState: LiveMarketState,
+  globalBudget: RiskBudget,
+  marketBudget: RiskBudget,
+): Promise<void> {
+  let hasFailedResponse = false;
+  for (const [submittedOrder, response] of responses) {
+    hasFailedResponse =
+      applyPostResponse(
+        submittedOrder,
+        response,
+        marketState,
+        globalBudget,
+        marketBudget,
+      ) || hasFailedResponse;
+  }
+
+  if (hasFailedResponse) {
+    const refreshedOrders = await openOrdersForToken(client, plan.tokenId);
+    marketState.removePendingOrdersNowOpen(refreshedOrders);
+    marketState.replaceOpenOrders(plan.tokenId, refreshedOrders);
+    console.log(
+      `post state refreshed for ${plan.marketSlug} ${plan.outcome} after rejected order response`,
+    );
+  }
+}
+
+function applyPostResponse(
+  submittedOrder: SubmittedOrder,
+  response: OrderResponse,
+  marketState: LiveMarketState,
+  globalBudget: RiskBudget,
+  marketBudget: RiskBudget,
+): boolean {
+  if (!responseSuccess(response)) {
+    return true;
+  }
+
+  marketState.recordPendingOrder(submittedOrder.proposedOrder);
+  if (submittedOrder.side === Side.BUY) {
+    reserveBuyCollateral(submittedOrder.collateral, globalBudget, marketBudget);
+  }
+  return false;
+}
+
+function responseSuccess(response: OrderResponse): boolean {
+  return response.success === true;
 }
 
 async function openOrdersForToken(
@@ -1337,8 +1430,9 @@ function marketLossExceedsCap(
   proposedOrder: ProposedOrder,
   marketState: LiveMarketState,
   config: Config,
+  stagedOrders: ProposedOrder[] = [],
 ): boolean {
-  const projectedLoss = marketState.projectedLoss(proposedOrder);
+  const projectedLoss = marketState.projectedLoss(proposedOrder, stagedOrders);
   if (projectedLoss <= config.maxLossPerMarket) {
     return false;
   }
@@ -1380,6 +1474,22 @@ function proposedOrderFromOpenOrder(
     price: numberOrDefault(order.price, 0),
     size,
   };
+}
+
+export function openOrderMatchesProposed(
+  order: OpenOrder,
+  proposedOrder: ProposedOrder,
+): boolean {
+  const side = sideFromOpenOrder(order.side);
+  const price = numberOrUndefined(order.price);
+  const remainingSize = openOrderRemainingSize(order);
+  return (
+    (order.asset_id || "") === proposedOrder.tokenId &&
+    side === proposedOrder.side &&
+    price === proposedOrder.price &&
+    remainingSize > 0 &&
+    remainingSize <= proposedOrder.size
+  );
 }
 
 function sideFromOpenOrder(side: string): Side | undefined {
@@ -1524,11 +1634,11 @@ export function isOpenOrder(order: OpenOrder): boolean {
 
 function printPostResponses(
   plan: QuotePlan,
-  responses: Array<[Side, OrderResponse]>,
+  responses: Array<[SubmittedOrder, OrderResponse]>,
 ): void {
-  for (const [side, response] of responses) {
+  for (const [submittedOrder, response] of responses) {
     console.log(
-      `posted ${plan.marketSlug} ${plan.outcome} side=${side} order_id=${response.orderID} ` +
+      `posted ${plan.marketSlug} ${plan.outcome} side=${submittedOrder.side} order_id=${response.orderID} ` +
         `success=${response.success} status=${response.status} error=${response.errorMsg}`,
     );
   }

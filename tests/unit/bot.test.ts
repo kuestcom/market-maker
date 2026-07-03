@@ -108,20 +108,39 @@ describe("bot feature #1", () => {
 
         budget.reserveOpenBuyOrder(order);
         expect(budget.remainingCollateral()).toBe(8);
+        expect(budget.reservedCollateral()).toBe(2);
 
         budget.releaseOpenBuyOrder(order);
         expect(budget.remainingCollateral()).toBe(10);
+        expect(budget.reservedCollateral()).toBe(0);
     });
 
-    it("releases only the collateral amount that was reserved", () => {
+    it("tracks over-limit open buy collateral without expanding spendable room", () => {
         const budget = new RiskBudget(3);
         const order = openOrder("buy", Side.BUY, "0.50", "10", 1);
 
         budget.reserveOpenBuyOrder(order);
         expect(budget.remainingCollateral()).toBe(0);
+        expect(budget.reservedCollateral()).toBe(5);
 
         budget.releaseOpenBuyOrder(order);
         expect(budget.remainingCollateral()).toBe(3);
+        expect(budget.reservedCollateral()).toBe(0);
+    });
+
+    it("does not restore buy room while remaining open buys still exceed the cap", () => {
+        const budget = new RiskBudget(3);
+        const first = openOrder("first", Side.BUY, "0.50", "10", 1);
+        const second = openOrder("second", Side.BUY, "0.50", "10", 2);
+
+        budget.reserveOpenBuyOrder(first);
+        budget.reserveOpenBuyOrder(second);
+        expect(budget.remainingCollateral()).toBe(0);
+        expect(budget.reservedCollateral()).toBe(10);
+
+        budget.releaseOpenBuyOrder(first);
+        expect(budget.remainingCollateral()).toBe(0);
+        expect(budget.reservedCollateral()).toBe(5);
     });
 
     it("trims only enough same-price size above the target", () => {

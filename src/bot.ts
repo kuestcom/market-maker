@@ -24,6 +24,7 @@ import {
   includesSell,
 } from "./config.js";
 import { conditionIdFromMarket, conditionIdsFromSiteConfig } from "./event-scope.js";
+import { errorMessage } from "./errors.js";
 import { ceilToTick, fairPrice, floorToTick, isTradeablePrice } from "./pricing.js";
 import {
   clearPauseState,
@@ -200,6 +201,10 @@ class LiveMarketState {
     );
   }
 
+  allOpenOrders(): OpenOrder[] {
+    return this.tokens.flatMap((token) => token.openOrders);
+  }
+
   riskBreaches(config: Config): RiskBreach[] {
     const breaches: RiskBreach[] = [];
     for (const token of this.tokens) {
@@ -364,15 +369,19 @@ export class MarketExposure {
 }
 
 export class RiskBudget {
-  private remaining: number;
+  private readonly collateralLimit: number;
+  private reservedNewCollateral = 0;
   private readonly countedOpenBuyOrders = new Map<string, number>();
 
   constructor(collateralLimit: number) {
-    this.remaining = Math.max(collateralLimit, 0);
+    this.collateralLimit = Math.max(collateralLimit, 0);
   }
 
   remainingCollateral(): number {
-    return Math.max(this.remaining, 0);
+    return Math.max(
+      this.collateralLimit - this.reservedCollateral() - this.reservedNewCollateral,
+      0,
+    );
   }
 
   reserveOpenBuyOrder(order: OpenOrder): void {
@@ -380,9 +389,8 @@ export class RiskBudget {
       return;
     }
     const collateral = openOrderRemainingSize(order) * numberOrDefault(order.price, 0);
-    const reserved = Math.min(Math.max(collateral, 0), this.remainingCollateral());
+    const reserved = Math.max(collateral, 0);
     this.countedOpenBuyOrders.set(order.id, reserved);
-    this.remaining = Math.max(this.remaining - reserved, 0);
   }
 
   releaseOpenBuyOrder(order: OpenOrder): void {
@@ -394,12 +402,18 @@ export class RiskBudget {
       return;
     }
     this.countedOpenBuyOrders.delete(order.id);
-    this.remaining += reserved;
+  }
+
+  reservedCollateral(): number {
+    return [...this.countedOpenBuyOrders.values()].reduce(
+      (total, collateral) => total + collateral,
+      0,
+    );
   }
 
   reserveNewCollateral(requested: number): number {
     const reserved = Math.min(Math.max(requested, 0), this.remainingCollateral());
-    this.remaining = Math.max(this.remaining - reserved, 0);
+    this.reservedNewCollateral += reserved;
     return reserved;
   }
 }
@@ -432,6 +446,11 @@ interface CancelOpenOrdersSummary {
   notCanceled: number;
   remainingOpen: number;
 }
+
+type PreflightRiskAudit =
+  | { result: "continue"; riskBudget: RiskBudget }
+  | { result: "skipCycle" }
+  | { result: "stop" };
 
 export async function run(config: Config): Promise<void> {
   if (config.clearPause) {
@@ -578,7 +597,29 @@ async function runCycles(
       continue;
     }
 
-    const riskBudget = new RiskBudget(config.maxTotalCollateral);
+    let riskBudget = new RiskBudget(config.maxTotalCollateral);
+    if (liveClient) {
+      const preflight = await preflightRiskAudit(
+        publicClient,
+        liveClient,
+        candidates.map((candidate) => candidate.market),
+        config,
+      );
+      if (preflight.result === "skipCycle") {
+        if (cycle < config.cycles) {
+          if (isShutdownRequested(shutdown)) {
+            return;
+          }
+          await interruptibleSleep(config.refreshSecs * 1000, shutdown);
+        }
+        continue;
+      }
+      if (preflight.result === "stop") {
+        return;
+      }
+      riskBudget = preflight.riskBudget;
+    }
+
     for (const candidate of candidates) {
       if (isShutdownRequested(shutdown)) {
         return;
@@ -625,6 +666,22 @@ async function skipLiveActionIfPaused(
   }
   console.log(
     `skip ${action} for ${plan.marketSlug} ${plan.outcome}: ` +
+      `pause active at ${config.pausePath} (${pause.reason.trim()})`,
+  );
+  return true;
+}
+
+async function skipMarketLiveActionIfPaused(
+  market: Market,
+  config: Config,
+  action: string,
+): Promise<boolean> {
+  const pause = await loadPauseState(config.pausePath);
+  if (!pause) {
+    return false;
+  }
+  console.log(
+    `skip ${action} for ${marketSlug(market)}: ` +
       `pause active at ${config.pausePath} (${pause.reason.trim()})`,
   );
   return true;
@@ -820,6 +877,124 @@ export function hasRewards(market: Market): boolean {
 
 export function marketKey(market: Market): string {
   return conditionIdFromMarket(market) ?? marketSlug(market);
+}
+
+async function preflightRiskAudit(
+  publicClient: ClobClient,
+  liveClient: ClobClient,
+  markets: Market[],
+  config: Config,
+): Promise<PreflightRiskAudit> {
+  const globalBudget = new RiskBudget(config.maxTotalCollateral);
+  if (markets.length === 0) {
+    return { result: "continue", riskBudget: globalBudget };
+  }
+
+  console.log(`preflight risk audit: checking ${markets.length} markets`);
+  const scannedMarkets: Array<{ market: Market; marketState: LiveMarketState }> = [];
+  for (const market of markets) {
+    const pause = await loadPauseState(config.pausePath);
+    if (pause) {
+      console.log(
+        `preflight risk audit stopped by ${config.pausePath}: ${pause.reason.trim()}`,
+      );
+      return { result: "stop" };
+    }
+
+    let tokenQuotes: TokenQuote[];
+    try {
+      tokenQuotes = await buildPreflightTokenQuotes(publicClient, market, config);
+    } catch (error) {
+      console.log(
+        `preflight risk audit skip ${marketSlug(market)}: ` +
+          `failed to fetch order books (${errorMessage(error)})`,
+      );
+      return { result: "skipCycle" };
+    }
+
+    let marketState: LiveMarketState;
+    try {
+      marketState = await LiveMarketState.load(liveClient, tokenQuotes);
+    } catch (error) {
+      console.log(
+        `preflight risk audit skip ${marketSlug(market)}: ` +
+          `failed to fetch live state (${errorMessage(error)})`,
+      );
+      return { result: "skipCycle" };
+    }
+
+    const staleReason = preflightStaleDataReason(
+      tokenQuotes,
+      marketState,
+      nowMs(),
+      config,
+    );
+    if (staleReason) {
+      console.log(
+        `preflight risk audit skip ${marketSlug(market)}: ` +
+          `stale live data (${staleReason})`,
+      );
+      return { result: "skipCycle" };
+    }
+
+    const breaches = marketState.riskBreaches(config);
+    if (breaches.length > 0) {
+      printPreflightRiskBreaches(market, breaches);
+      if (config.cancelOnRiskBreach) {
+        await cancelRiskIncreasingMarketOrders(liveClient, market, config, marketState);
+      }
+      if (config.pauseOnRiskBreach) {
+        const reason = preflightBreachPauseReason(market, breaches);
+        await savePauseReason(config.pausePath, reason);
+        console.log(`wrote pause file ${config.pausePath}: ${reason}`);
+        return { result: "stop" };
+      }
+      return { result: "skipCycle" };
+    }
+
+    scannedMarkets.push({ market, marketState });
+    for (const order of marketState.allOpenOrders()) {
+      globalBudget.reserveOpenBuyOrder(order);
+    }
+  }
+
+  const usedCollateral = globalBudget.reservedCollateral();
+  if (usedCollateral > config.maxTotalCollateral) {
+    const reason =
+      `preflight risk breach: total open buy collateral ${usedCollateral} ` +
+      `exceeds limit ${config.maxTotalCollateral}`;
+    console.log(reason);
+    if (config.cancelOnRiskBreach) {
+      for (const { market, marketState } of scannedMarkets) {
+        await cancelRiskIncreasingMarketOrders(liveClient, market, config, marketState);
+      }
+    }
+    if (config.pauseOnRiskBreach) {
+      await savePauseReason(config.pausePath, reason);
+      console.log(`wrote pause file ${config.pausePath}: ${reason}`);
+      return { result: "stop" };
+    }
+    return { result: "skipCycle" };
+  }
+
+  return { result: "continue", riskBudget: globalBudget };
+}
+
+async function buildPreflightTokenQuotes(
+  publicClient: ClobClient,
+  market: Market,
+  config: Config,
+): Promise<TokenQuote[]> {
+  const tokenQuotes: TokenQuote[] = [];
+  for (const token of marketTokens(market)) {
+    const tokenId = tokenIdFromToken(token);
+    if (!tokenId) {
+      continue;
+    }
+    const book = await publicClient.getOrderBook(tokenId);
+    tokenQuotes.push(buildTokenQuote(market, token, book, nowMs(), config));
+  }
+  return tokenQuotes;
 }
 
 async function quoteMarket(
@@ -1177,6 +1352,14 @@ function printRiskBreaches(plan: QuotePlan, breaches: RiskBreach[]): void {
   }
 }
 
+function printPreflightRiskBreaches(market: Market, breaches: RiskBreach[]): void {
+  for (const breach of breaches) {
+    console.log(
+      `preflight risk breach ${marketSlug(market)}: ${riskBreachMessage(breach)}`,
+    );
+  }
+}
+
 function riskBreachMessage(breach: RiskBreach): string {
   if (breach.kind === "tokenInventory") {
     return `token ${breach.tokenId} inventory ${breach.value} exceeds limit ${breach.limit}`;
@@ -1192,6 +1375,12 @@ function riskBreachMessage(breach: RiskBreach): string {
 
 function riskBreachPauseReason(plan: QuotePlan, breaches: RiskBreach[]): string {
   return `risk breach ${plan.marketSlug} ${plan.outcome}: ${breaches
+    .map(riskBreachMessage)
+    .join("; ")}`;
+}
+
+function preflightBreachPauseReason(market: Market, breaches: RiskBreach[]): string {
+  return `preflight risk breach ${marketSlug(market)}: ${breaches
     .map(riskBreachMessage)
     .join("; ")}`;
 }
@@ -1717,6 +1906,44 @@ async function cancelRiskIncreasingOrders(
       `canceled=${canceled.length} not_canceled=${notCanceled.length}`,
   );
   return openOrdersForToken(client, plan.tokenId);
+}
+
+async function cancelRiskIncreasingMarketOrders(
+  client: ClobClient,
+  market: Market,
+  config: Config,
+  marketState: LiveMarketState,
+): Promise<void> {
+  const orderIds = marketState
+    .allOpenOrders()
+    .filter((order) => sideFromOpenOrder(order.side) === Side.BUY)
+    .map((order) => order.id)
+    .filter((id) => id.length > 0);
+  if (orderIds.length === 0) {
+    return;
+  }
+
+  let canceledCount = 0;
+  let notCanceledCount = 0;
+  for (const batch of batched(orderIds, CANCEL_ORDER_BATCH_SIZE)) {
+    if (
+      await skipMarketLiveActionIfPaused(
+        market,
+        config,
+        "canceling preflight risk-increasing orders",
+      )
+    ) {
+      return;
+    }
+    const response = await client.cancelOrders(batch);
+    canceledCount += responseList(response, "canceled").length;
+    notCanceledCount += responseList(response, "not_canceled").length;
+  }
+
+  console.log(
+    `preflight risk cancel ${marketSlug(market)}: ` +
+      `canceled=${canceledCount} not_canceled=${notCanceledCount}`,
+  );
 }
 
 function releaseClosedOpenBuyOrders(

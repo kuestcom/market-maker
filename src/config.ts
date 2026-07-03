@@ -615,7 +615,8 @@ function validateConfig(config: Config): void {
 export function bandMarginTicks(config: Config): [number, number, number] {
   const minMargin = config.bandMinMarginTicks ?? config.edgeTicks;
   const avgMargin = config.bandAvgMarginTicks ?? minMargin;
-  const maxMargin = config.bandMaxMarginTicks ?? minMargin + config.minSpreadTicks;
+  const maxMargin =
+    config.bandMaxMarginTicks ?? Math.max(avgMargin, minMargin + config.minSpreadTicks);
   return [minMargin, avgMargin, maxMargin];
 }
 

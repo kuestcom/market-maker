@@ -72,6 +72,12 @@ describe("config", () => {
         ).toThrow("MARKET_MAKER_BAND_*_MARGIN_TICKS");
     });
 
+    it("allows average margin override without explicit max margin", () => {
+        const config = parseConfig(["--band-avg-margin-ticks", "5"], {});
+
+        expect(bandMarginTicks(config)).toEqual([1, 5, 5]);
+    });
+
     it("rejects invalid band sizes", () => {
         expect(() =>
             parseConfig([

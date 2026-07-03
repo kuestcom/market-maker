@@ -130,6 +130,30 @@ describe("bot feature #1", () => {
         expect(canceled.map(order => order.id)).toEqual(["outside"]);
     });
 
+    it("trims least competitive band orders before best priced liquidity", () => {
+        const orders = [
+            openOrder("far", Side.BUY, "0.47", "5", 1),
+            openOrder("middle", Side.BUY, "0.48", "5", 2),
+            openOrder("best", Side.BUY, "0.49", "5", 3),
+        ];
+
+        const canceled = cancellableOrders(
+            orders,
+            {
+                ...plan(),
+                buyBand: {
+                    ...quoteBand(),
+                    minSize: 5,
+                    avgSize: 10,
+                    maxSize: 12,
+                },
+            },
+            config(),
+        );
+
+        expect(canceled.map(order => order.id)).toEqual(["far"]);
+    });
+
     it("tops up bands only below minimum size", () => {
         const band = quoteBand();
 

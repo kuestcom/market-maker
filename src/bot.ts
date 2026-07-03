@@ -1104,7 +1104,7 @@ export function cancellableOrders(
     if (bandAmount > band.maxSize) {
       const excessiveOrders = [...matchingOrders].sort(
         (left, right) =>
-          cancelPriority(band, left) - cancelPriority(band, right) ||
+          cancelPriority(band, right) - cancelPriority(band, left) ||
           right.created_at - left.created_at,
       );
       for (const order of excessiveOrders) {

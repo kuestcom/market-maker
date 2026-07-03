@@ -17,6 +17,8 @@ export interface Config {
   orderSize: number;
   edgeTicks: number;
   minSpreadTicks: number;
+  maxBookSpreadTicks: number;
+  minTopDepth: number;
   quoteSides: QuoteSides;
   allowSingleSided: boolean;
   respectRewardMinSize: boolean;
@@ -51,6 +53,8 @@ Options:
   --order-size <n>                  MARKET_MAKER_ORDER_SIZE, default 5
   --edge-ticks <n>                  MARKET_MAKER_EDGE_TICKS, default 1
   --min-spread-ticks <n>            MARKET_MAKER_MIN_SPREAD_TICKS, default 2
+  --max-book-spread-ticks <n>       MARKET_MAKER_MAX_BOOK_SPREAD_TICKS, default 20
+  --min-top-depth <n>               MARKET_MAKER_MIN_TOP_DEPTH, default 5
   --quote-sides <side>              MARKET_MAKER_QUOTE_SIDES, buy | sell | both
   --allow-single-sided              MARKET_MAKER_ALLOW_SINGLE_SIDED, default true
   --respect-reward-min-size         MARKET_MAKER_RESPECT_REWARD_MIN_SIZE, default false
@@ -85,6 +89,8 @@ const knownOptions = new Set([
   "order-size",
   "edge-ticks",
   "min-spread-ticks",
+  "max-book-spread-ticks",
+  "min-top-depth",
   "quote-sides",
   "allow-single-sided",
   "respect-reward-min-size",
@@ -162,6 +168,20 @@ export function parseConfig(
       "min-spread-ticks",
       "MARKET_MAKER_MIN_SPREAD_TICKS",
       2,
+    ),
+    maxBookSpreadTicks: numberArg(
+      args,
+      env,
+      "max-book-spread-ticks",
+      "MARKET_MAKER_MAX_BOOK_SPREAD_TICKS",
+      20,
+    ),
+    minTopDepth: numberArg(
+      args,
+      env,
+      "min-top-depth",
+      "MARKET_MAKER_MIN_TOP_DEPTH",
+      5,
     ),
     quoteSides: choiceArg(
       args,
@@ -450,6 +470,12 @@ function validateConfig(config: Config): void {
   }
   if (config.minSpreadTicks <= 0) {
     throw new Error("MARKET_MAKER_MIN_SPREAD_TICKS must be greater than zero");
+  }
+  if (config.maxBookSpreadTicks <= 0) {
+    throw new Error("MARKET_MAKER_MAX_BOOK_SPREAD_TICKS must be greater than zero");
+  }
+  if (config.minTopDepth < 0) {
+    throw new Error("MARKET_MAKER_MIN_TOP_DEPTH cannot be negative");
   }
   if (config.eventSlug !== undefined && config.eventSlug.trim() === "") {
     throw new Error("MARKET_MAKER_EVENT_SLUG cannot be empty");

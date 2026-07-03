@@ -3,10 +3,13 @@ import {
     RiskBudget,
     MarketExposure,
     affordableBuySize,
+    bandContainsPrice,
+    bandMissingSize,
     buildQuotePlan,
     cancellableOrders,
     isOpenOrder,
     liquidityRejectReason,
+    type QuoteBand,
     type QuotePlan,
     selectEventCandidates,
 } from "../../src/bot.js";
@@ -43,6 +46,43 @@ describe("bot feature #1", () => {
         expect(plan).toBeUndefined();
     });
 
+    it("builds configured quote bands around fair value", () => {
+        const plan = buildQuotePlan(
+            market("market"),
+            { token_id: "yes", outcome: "Yes", price: "0.50" },
+            book({ bids: [{ price: "0.49", size: "5" }], asks: [{ price: "0.51", size: "5" }] }),
+            {
+                ...config(),
+                quoteSides: "both",
+                bandMinMarginTicks: 2,
+                bandAvgMarginTicks: 3,
+                bandMaxMarginTicks: 4,
+                bandMinSize: 3,
+                bandAvgSize: 7,
+                bandMaxSize: 9,
+            },
+        );
+
+        expect(plan?.buyBand).toMatchObject({
+            side: Side.BUY,
+            price: 0.47,
+            minPrice: 0.46,
+            maxPrice: 0.48,
+            minSize: 3,
+            avgSize: 7,
+            maxSize: 9,
+        });
+        expect(plan?.sellBand).toMatchObject({
+            side: Side.SELL,
+            price: 0.53,
+            minPrice: 0.52,
+            maxPrice: 0.54,
+            minSize: 3,
+            avgSize: 7,
+            maxSize: 9,
+        });
+    });
+
     it("caps buy top-up size by available collateral budgets", () => {
         const globalBudget = new RiskBudget(10);
         const marketBudget = new RiskBudget(10);
@@ -59,9 +99,77 @@ describe("bot feature #1", () => {
             openOrder("newest", Side.BUY, "0.49", "3", 3),
         ];
 
-        const canceled = cancellableOrders(orders, plan(), config());
+        const canceled = cancellableOrders(
+            orders,
+            {
+                ...plan(),
+                buyBand: {
+                    ...quoteBand(),
+                    minPrice: 0.49,
+                    maxPrice: 0.49,
+                    minSize: 5,
+                    avgSize: 5,
+                    maxSize: 5,
+                },
+            },
+            config(),
+        );
 
         expect(canceled.map(order => order.id)).toEqual(["newest", "middle"]);
+    });
+
+    it("keeps orders inside a quote band and cancels orders outside it", () => {
+        const orders = [
+            openOrder("inside-low", Side.BUY, "0.47", "2", 1),
+            openOrder("inside-high", Side.BUY, "0.49", "2", 2),
+            openOrder("outside", Side.BUY, "0.46", "2", 3),
+        ];
+
+        const canceled = cancellableOrders(orders, plan(), config());
+
+        expect(canceled.map(order => order.id)).toEqual(["outside"]);
+    });
+
+    it("trims least competitive band orders before best priced liquidity", () => {
+        const orders = [
+            openOrder("far", Side.BUY, "0.47", "5", 1),
+            openOrder("middle", Side.BUY, "0.48", "5", 2),
+            openOrder("best", Side.BUY, "0.49", "5", 3),
+        ];
+
+        const canceled = cancellableOrders(
+            orders,
+            {
+                ...plan(),
+                buyBand: {
+                    ...quoteBand(),
+                    minSize: 5,
+                    avgSize: 10,
+                    maxSize: 12,
+                },
+            },
+            config(),
+        );
+
+        expect(canceled.map(order => order.id)).toEqual(["far"]);
+    });
+
+    it("tops up bands only below minimum size", () => {
+        const band = quoteBand();
+
+        expect(bandMissingSize(band, 4)).toBe(6);
+        expect(bandMissingSize(band, 5)).toBeUndefined();
+        expect(bandMissingSize(band, 9)).toBeUndefined();
+    });
+
+    it("checks prices against inclusive quote band bounds", () => {
+        const band = quoteBand();
+
+        expect(bandContainsPrice(band, 0.47)).toBe(true);
+        expect(bandContainsPrice(band, 0.48)).toBe(true);
+        expect(bandContainsPrice(band, 0.49)).toBe(true);
+        expect(bandContainsPrice(band, 0.46)).toBe(false);
+        expect(bandContainsPrice(band, 0.5)).toBe(false);
     });
 
     it("keeps documented OPEN status in reconciliation", () => {
@@ -211,8 +319,19 @@ function plan(): QuotePlan {
         fairPrice: 0.5,
         bestBid: 0.49,
         bestAsk: 0.51,
-        buyPrice: 0.49,
-        size: 5,
+        buyBand: quoteBand(),
+    };
+}
+
+function quoteBand(): QuoteBand {
+    return {
+        side: Side.BUY,
+        price: 0.49,
+        minPrice: 0.47,
+        maxPrice: 0.49,
+        minSize: 5,
+        avgSize: 10,
+        maxSize: 15,
     };
 }
 

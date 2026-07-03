@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseConfig } from "../../src/config.js";
+import { bandMarginTicks, bandSizes, parseConfig } from "../../src/config.js";
 
 describe("config", () => {
     it("configures event slug and rust parity safety defaults", () => {
@@ -9,6 +9,8 @@ describe("config", () => {
         expect(config.requireTwoSidedLive).toBe(true);
         expect(config.minPrice).toBe(0.05);
         expect(config.maxPrice).toBe(0.95);
+        expect(bandMarginTicks(config)).toEqual([1, 1, 3]);
+        expect(bandSizes(config)).toEqual([5, 5, 5]);
         expect(config.maxBookSpreadTicks).toBe(20);
         expect(config.minTopDepth).toBe(5);
         expect(config.maxCollateralPerMarket).toBe(25);
@@ -58,6 +60,32 @@ describe("config", () => {
         expect(() => parseConfig(["--min-top-depth", "-1"], {})).toThrow(
             "MARKET_MAKER_MIN_TOP_DEPTH",
         );
+    });
+
+    it("rejects invalid band margins", () => {
+        expect(() =>
+            parseConfig([
+                "--band-min-margin-ticks", "4",
+                "--band-avg-margin-ticks", "3",
+                "--band-max-margin-ticks", "5",
+            ], {}),
+        ).toThrow("MARKET_MAKER_BAND_*_MARGIN_TICKS");
+    });
+
+    it("allows average margin override without explicit max margin", () => {
+        const config = parseConfig(["--band-avg-margin-ticks", "5"], {});
+
+        expect(bandMarginTicks(config)).toEqual([1, 5, 5]);
+    });
+
+    it("rejects invalid band sizes", () => {
+        expect(() =>
+            parseConfig([
+                "--band-min-size", "10",
+                "--band-avg-size", "5",
+                "--band-max-size", "10",
+            ], {}),
+        ).toThrow("MARKET_MAKER_BAND_*_SIZE");
     });
 
     it("rejects fractional open order limit", () => {

@@ -73,8 +73,9 @@ export interface QuoteBand {
   maxSize: number;
 }
 
-interface TokenQuote {
+export interface TokenQuote {
   tokenId: string;
+  outcome: string;
   fairPrice: number;
   bookFetchedAt: number;
   plan?: QuotePlan;
@@ -86,7 +87,7 @@ interface ShutdownState {
   abortController?: AbortController;
 }
 
-class LiveMarketState {
+export class LiveMarketState {
   constructor(
     private readonly tokens: LiveTokenState[],
     private pendingOrders: ProposedOrder[] = [],
@@ -448,9 +449,19 @@ interface CancelOpenOrdersSummary {
 }
 
 type PreflightRiskAudit =
-  | { result: "continue"; riskBudget: RiskBudget }
+  | {
+      result: "continue";
+      riskBudget: RiskBudget;
+      snapshots: PreflightMarketSnapshot[];
+    }
   | { result: "skipCycle" }
   | { result: "stop" };
+
+export interface PreflightMarketSnapshot {
+  marketKey: string;
+  tokenQuotes: TokenQuote[];
+  marketState: LiveMarketState;
+}
 
 export async function run(config: Config): Promise<void> {
   if (config.clearPause) {
@@ -598,6 +609,7 @@ async function runCycles(
     }
 
     let riskBudget = new RiskBudget(config.maxTotalCollateral);
+    let preflightSnapshots: PreflightMarketSnapshot[] = [];
     if (liveClient) {
       const preflight = await preflightRiskAudit(
         publicClient,
@@ -618,11 +630,16 @@ async function runCycles(
         return;
       }
       riskBudget = preflight.riskBudget;
+      preflightSnapshots = [...preflight.snapshots];
     }
 
     for (const candidate of candidates) {
       if (isShutdownRequested(shutdown)) {
         return;
+      }
+      const preflightSnapshot = liveClient ? preflightSnapshots.shift() : undefined;
+      if (liveClient && !preflightSnapshot) {
+        throw new Error("missing preflight snapshot for live quote");
       }
       await quoteMarket(
         publicClient,
@@ -630,6 +647,7 @@ async function runCycles(
         candidate.market,
         config,
         riskBudget,
+        preflightSnapshot,
         shutdown,
       );
       if (await stopIfPaused(config)) {
@@ -887,11 +905,12 @@ async function preflightRiskAudit(
 ): Promise<PreflightRiskAudit> {
   const globalBudget = new RiskBudget(config.maxTotalCollateral);
   if (markets.length === 0) {
-    return { result: "continue", riskBudget: globalBudget };
+    return { result: "continue", riskBudget: globalBudget, snapshots: [] };
   }
 
   console.log(`preflight risk audit: checking ${markets.length} markets`);
   const scannedMarkets: Array<{ market: Market; marketState: LiveMarketState }> = [];
+  const snapshots: PreflightMarketSnapshot[] = [];
   for (const market of markets) {
     const pause = await loadPauseState(config.pausePath);
     if (pause) {
@@ -956,6 +975,11 @@ async function preflightRiskAudit(
     for (const order of marketState.allOpenOrders()) {
       globalBudget.reserveOpenBuyOrder(order);
     }
+    snapshots.push({
+      marketKey: marketKey(market),
+      tokenQuotes,
+      marketState,
+    });
   }
 
   const usedCollateral = globalBudget.reservedCollateral();
@@ -977,7 +1001,7 @@ async function preflightRiskAudit(
     return { result: "skipCycle" };
   }
 
-  return { result: "continue", riskBudget: globalBudget };
+  return { result: "continue", riskBudget: globalBudget, snapshots };
 }
 
 async function buildPreflightTokenQuotes(
@@ -997,48 +1021,53 @@ async function buildPreflightTokenQuotes(
   return tokenQuotes;
 }
 
+export function preflightSnapshotForMarket(
+  snapshot: PreflightMarketSnapshot | undefined,
+  expectedMarketKey: string,
+): PreflightMarketSnapshot | undefined {
+  if (!snapshot) {
+    return undefined;
+  }
+  if (snapshot.marketKey !== expectedMarketKey) {
+    throw new Error(
+      `preflight snapshot market mismatch: expected ${expectedMarketKey}, got ${snapshot.marketKey}`,
+    );
+  }
+  return snapshot;
+}
+
 async function quoteMarket(
   publicClient: ClobClient,
   liveClient: ClobClient | undefined,
   market: Market,
   config: Config,
   globalBudget: RiskBudget,
+  preflightSnapshot?: PreflightMarketSnapshot,
   shutdown?: ShutdownState,
 ): Promise<void> {
   const marketBudget = new RiskBudget(config.maxCollateralPerMarket);
-  const tokenQuotes: TokenQuote[] = [];
-  for (const token of marketTokens(market)) {
-    if (isShutdownRequested(shutdown)) {
-      return;
-    }
-    const tokenId = tokenIdFromToken(token);
-    if (!tokenId) {
-      continue;
-    }
-
-    const book = await publicClient.getOrderBook(tokenId);
-    const bookFetchedAt = nowMs();
-    if (isShutdownRequested(shutdown)) {
-      return;
-    }
-    const tokenQuote = buildTokenQuote(market, token, book, bookFetchedAt, config);
+  const snapshot = preflightSnapshotForMarket(preflightSnapshot, marketKey(market));
+  const tokenQuotes = snapshot
+    ? snapshot.tokenQuotes
+    : await buildPreflightTokenQuotes(publicClient, market, config);
+  for (const tokenQuote of tokenQuotes) {
     if (!tokenQuote.plan) {
       console.log(
-        `skip ${marketSlug(market)} ${tokenOutcome(token)}: ` +
+        `skip ${marketSlug(market)} ${tokenQuote.outcome}: ` +
           `${tokenQuote.skipReason ?? "no safe quote at configured edge/sides"}`,
       );
     } else {
       printPlan(tokenQuote.plan, config.live);
     }
-
-    tokenQuotes.push(tokenQuote);
   }
 
   if (isShutdownRequested(shutdown)) {
     return;
   }
   if (liveClient) {
-    const marketState = await LiveMarketState.load(liveClient, tokenQuotes);
+    const marketState = snapshot
+      ? snapshot.marketState
+      : await LiveMarketState.load(liveClient, tokenQuotes);
     const staleReason = preflightStaleDataReason(tokenQuotes, marketState, nowMs(), config);
     if (staleReason) {
       console.log(`skip live quote ${marketSlug(market)}: stale live data (${staleReason})`);
@@ -1086,6 +1115,7 @@ function buildTokenQuote(
     : buildQuotePlan(market, token, book, config, bookFetchedAt);
   return {
     tokenId: tokenIdFromToken(token),
+    outcome: tokenOutcome(token),
     fairPrice: fair,
     bookFetchedAt,
     plan,

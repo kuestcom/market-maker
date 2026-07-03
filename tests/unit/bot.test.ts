@@ -13,9 +13,11 @@ import {
     liquidityRejectReason,
     managedTokenIds,
     openOrderMatchesProposed,
+    preflightSnapshotForMarket,
     riskBreachAppliesToToken,
     staleInputReason,
     tokenLongInventory,
+    type PreflightMarketSnapshot,
     type QuoteBand,
     type QuotePlan,
     type RiskBreach,
@@ -469,6 +471,18 @@ describe("market loss guard", () => {
 
         expect(riskBreachAppliesToToken(breaches, "yes")).toBe(true);
         expect(riskBreachAppliesToToken(breaches, "no")).toBe(true);
+    });
+
+    it("rejects preflight snapshot market key mismatches", () => {
+        const snapshot: PreflightMarketSnapshot = {
+            marketKey: "market-a",
+            tokenQuotes: [],
+            marketState: {} as never,
+        };
+
+        expect(() => preflightSnapshotForMarket(snapshot, "market-b")).toThrow(
+            "preflight snapshot market mismatch",
+        );
     });
 });
 

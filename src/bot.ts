@@ -1838,7 +1838,7 @@ function buyOrderSizeForToken(orders: OpenOrder[], tokenId: string): number {
   return orders
     .filter(
       (order) =>
-        (order.asset_id || tokenId) === tokenId &&
+        (order.asset_id || "") === tokenId &&
         order.side === Side.BUY,
     )
     .reduce((total, order) => total + openOrderRemainingSize(order), 0);

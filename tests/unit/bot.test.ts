@@ -187,6 +187,18 @@ describe("bot feature #1", () => {
         ).toBe(14);
     });
 
+    it("does not count open buys with missing token id toward every token inventory", () => {
+        expect(
+            tokenLongInventory(
+                0,
+                [openOrder("missing-token", Side.BUY, "0.49", "3", 1, "OPEN", "0", "")],
+                [],
+                [],
+                "yes",
+            ),
+        ).toBe(0);
+    });
+
     it("checks prices against inclusive quote band bounds", () => {
         const band = quoteBand();
 
@@ -422,6 +434,7 @@ function openOrder(
     createdAt: number,
     status = "OPEN",
     sizeMatched = "0",
+    assetId = "yes",
 ): OpenOrder {
     return {
         id,
@@ -429,7 +442,7 @@ function openOrder(
         owner: "owner",
         maker_address: "maker",
         market: "market",
-        asset_id: "yes",
+        asset_id: assetId,
         side,
         original_size: size,
         size_matched: sizeMatched,

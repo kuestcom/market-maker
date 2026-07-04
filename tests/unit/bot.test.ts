@@ -499,6 +499,16 @@ describe("market loss guard", () => {
         ).toBe(6);
     });
 
+    it("does not let orphaned sells from pruned fills make ledger position negative", () => {
+        expect(
+            tokenLedgerPosition([
+                fillRecord("sell-a", "yes", Side.SELL, 4, 0.7, 2),
+                fillRecord("buy-a", "yes", Side.BUY, 3, 0.4, 3),
+                fillRecord("sell-b", "yes", Side.SELL, 5, 0.7, 4),
+            ]),
+        ).toBe(0);
+    });
+
     it("reports position reconciliation mismatches beyond tolerance", () => {
         expect(positionReconcileErrorFor(6.0000005, 6, 0.000001)).toBeUndefined();
         expect(positionReconcileErrorFor(7, 6, 0.000001)).toMatchObject({

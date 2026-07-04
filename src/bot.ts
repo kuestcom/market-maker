@@ -2063,7 +2063,7 @@ export function tokenLedgerPosition(fillRecords: FillRecord[]): number {
       return position + record.size;
     }
     if (record.side === Side.SELL) {
-      return position - record.size;
+      return Math.max(position - record.size, 0);
     }
     return position;
   }, 0);

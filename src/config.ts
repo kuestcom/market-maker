@@ -52,6 +52,8 @@ export interface Config {
   cycles: number;
   refreshSecs: number;
   statePath: string;
+  fillStatePath: string;
+  fillMaxRecords: number;
 }
 
 export const HELP_TEXT = `Usage: market-maker [options]
@@ -104,6 +106,8 @@ Options:
   --cycles <n>                      MARKET_MAKER_CYCLES, default 1
   --refresh-secs <n>                MARKET_MAKER_REFRESH_SECS, default 30
   --state-path <path>               MARKET_MAKER_STATE_PATH, default state/seen-markets.json
+  --fill-state-path <path>          MARKET_MAKER_FILL_STATE_PATH, default state/fills.json
+  --fill-max-records <n>            MARKET_MAKER_FILL_MAX_RECORDS, default 10000
   --help                            Show this help message`;
 
 type CliValue = string | boolean;
@@ -156,6 +160,8 @@ const knownOptions = new Set([
   "cycles",
   "refresh-secs",
   "state-path",
+  "fill-state-path",
+  "fill-max-records",
   "help",
 ]);
 
@@ -438,6 +444,19 @@ export function parseConfig(
       "MARKET_MAKER_STATE_PATH",
       "state/seen-markets.json",
     ),
+    fillStatePath: optionalRawStringArg(
+      args,
+      env,
+      "fill-state-path",
+      "MARKET_MAKER_FILL_STATE_PATH",
+    ) ?? "state/fills.json",
+    fillMaxRecords: numberArg(
+      args,
+      env,
+      "fill-max-records",
+      "MARKET_MAKER_FILL_MAX_RECORDS",
+      10_000,
+    ),
   };
 
   validateConfig(config);
@@ -612,6 +631,9 @@ function validateConfig(config: Config): void {
   if (config.pausePath.trim() === "") {
     throw new Error("MARKET_MAKER_PAUSE_PATH cannot be empty");
   }
+  if (config.fillStatePath.trim() === "") {
+    throw new Error("MARKET_MAKER_FILL_STATE_PATH cannot be empty");
+  }
   if (config.clearPause && (config.cancelAll || config.cancelAllOnExit)) {
     throw new Error(
       "MARKET_MAKER_CLEAR_PAUSE cannot be combined with cancel-all actions",
@@ -706,6 +728,9 @@ function validateConfig(config: Config): void {
   }
   if (config.cycles <= 0) {
     throw new Error("MARKET_MAKER_CYCLES must be greater than zero");
+  }
+  if (!Number.isInteger(config.fillMaxRecords) || config.fillMaxRecords <= 0) {
+    throw new Error("MARKET_MAKER_FILL_MAX_RECORDS must be a positive integer");
   }
   if (config.cancelAll && config.cancelAllOnExit) {
     throw new Error(

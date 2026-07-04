@@ -28,6 +28,8 @@ describe("config", () => {
         expect(config.pausePath).toBe("state/paused.json");
         expect(config.maxPrePostMoveTicks).toBe(2);
         expect(config.maxDataAgeSecs).toBe(10);
+        expect(config.fillStatePath).toBe("state/fills.json");
+        expect(config.fillMaxRecords).toBe(10000);
     });
 
     it("rejects empty event slug", () => {
@@ -161,7 +163,7 @@ describe("config", () => {
     });
 
     it("allows clear-pause without live credentials or trading validations", () => {
-        const config = parseConfig(["--clear-pause", "--max-markets", "0"], {});
+        const config = parseConfig(["--clear-pause", "--max-markets", "0", "--fill-max-records", "0"], {});
 
         expect(config.clearPause).toBe(true);
     });
@@ -175,6 +177,24 @@ describe("config", () => {
     it("rejects zero pre-post move limit", () => {
         expect(() => parseConfig(["--max-pre-post-move-ticks", "0"], {})).toThrow(
             "MARKET_MAKER_MAX_PRE_POST_MOVE_TICKS must be greater than zero",
+        );
+    });
+
+    it("rejects empty fill state path", () => {
+        expect(() => parseConfig(["--fill-state-path", "  "], {})).toThrow(
+            "MARKET_MAKER_FILL_STATE_PATH",
+        );
+    });
+
+    it("rejects zero fill max records", () => {
+        expect(() => parseConfig(["--fill-max-records", "0"], {})).toThrow(
+            "MARKET_MAKER_FILL_MAX_RECORDS must be a positive integer",
+        );
+    });
+
+    it("rejects fractional fill max records", () => {
+        expect(() => parseConfig(["--fill-max-records", "1.5"], {})).toThrow(
+            "MARKET_MAKER_FILL_MAX_RECORDS must be a positive integer",
         );
     });
 });

@@ -17,6 +17,8 @@ import {
     priceMoveRejectReason,
     riskBreachAppliesToToken,
     staleInputReason,
+    tokenCostBasis,
+    tradeMatchTimeUnixSecs,
     tokenLongInventory,
     type PreflightMarketSnapshot,
     type QuoteBand,
@@ -25,6 +27,7 @@ import {
     selectEventCandidates,
 } from "../../src/bot.js";
 import type { Config } from "../../src/config.js";
+import type { FillRecord } from "../../src/state.js";
 import { Side, type OpenOrder, type OrderBookSummary } from "../../vendor/clob-client/dist/types.js";
 
 describe("bot feature #1", () => {
@@ -419,6 +422,8 @@ function config(): Config {
         cycles: 1,
         refreshSecs: 30,
         statePath: "state/seen-markets.json",
+        fillStatePath: "state/fills.json",
+        fillMaxRecords: 10000,
     };
 }
 
@@ -455,6 +460,30 @@ describe("market loss guard", () => {
         ]);
 
         expect(exposure.buyCollateral()).toBe(2);
+    });
+
+    it("uses realized average cost after sells for token cost basis", () => {
+        expect(
+            tokenCostBasis(
+                [
+                    fillRecord("buy-a", "yes", Side.BUY, 10, 0.4, 1),
+                    fillRecord("sell-a", "yes", Side.SELL, 4, 0.7, 2),
+                ],
+                6,
+                0.5,
+            ),
+        ).toBe(2.4);
+    });
+
+    it("falls back to fair price for balance not covered by fills", () => {
+        expect(
+            tokenCostBasis([fillRecord("buy-a", "yes", Side.BUY, 2, 0.4, 1)], 5, 0.5),
+        ).toBe(2.3);
+    });
+
+    it("normalizes numeric millisecond trade timestamps to seconds", () => {
+        expect(tradeMatchTimeUnixSecs("1700000000123")).toBe(1700000000);
+        expect(tradeMatchTimeUnixSecs("1700000000")).toBe(1700000000);
     });
 
     it("applies token inventory breaches only to their token", () => {
@@ -558,5 +587,25 @@ function openOrder(
         created_at: createdAt,
         expiration: "0",
         order_type: "GTC",
+    };
+}
+
+function fillRecord(
+    id: string,
+    tokenId: string,
+    side: Side,
+    size: number,
+    price: number,
+    matchedAtUnixSecs: number,
+): FillRecord {
+    return {
+        id,
+        tokenId,
+        market: "market-a",
+        side,
+        size,
+        price,
+        status: "Matched",
+        matchedAtUnixSecs,
     };
 }

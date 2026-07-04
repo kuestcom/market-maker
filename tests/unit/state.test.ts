@@ -121,6 +121,41 @@ describe("state", () => {
 
         await expect(loadFillLedger(path)).rejects.toThrow("fill record key must match id");
     });
+
+    it("rejects string fill size and price values", async () => {
+        const dir = await tempDir();
+        const path = join(dir, "state", "fills.json");
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(
+            path,
+            JSON.stringify({
+                trades: {
+                    "trade-a": {
+                        ...fillRecordJson("trade-a", "yes", "BUY", 1, 0.4, 1),
+                        size: "1",
+                    },
+                },
+            }),
+            "utf8",
+        );
+
+        await expect(loadFillLedger(path)).rejects.toThrow("size must be a finite number");
+
+        await writeFile(
+            path,
+            JSON.stringify({
+                trades: {
+                    "trade-a": {
+                        ...fillRecordJson("trade-a", "yes", "BUY", 1, 0.4, 1),
+                        price: "0.4",
+                    },
+                },
+            }),
+            "utf8",
+        );
+
+        await expect(loadFillLedger(path)).rejects.toThrow("price must be a finite number");
+    });
 });
 
 async function tempDir(): Promise<string> {

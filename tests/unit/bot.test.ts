@@ -18,6 +18,7 @@ import {
     riskBreachAppliesToToken,
     staleInputReason,
     tokenCostBasis,
+    tradeMatchTimeUnixSecs,
     tokenLongInventory,
     type PreflightMarketSnapshot,
     type QuoteBand,
@@ -478,6 +479,11 @@ describe("market loss guard", () => {
         expect(
             tokenCostBasis([fillRecord("buy-a", "yes", Side.BUY, 2, 0.4, 1)], 5, 0.5),
         ).toBe(2.3);
+    });
+
+    it("normalizes numeric millisecond trade timestamps to seconds", () => {
+        expect(tradeMatchTimeUnixSecs("1700000000123")).toBe(1700000000);
+        expect(tradeMatchTimeUnixSecs("1700000000")).toBe(1700000000);
     });
 
     it("applies token inventory breaches only to their token", () => {

@@ -285,8 +285,8 @@ function requiredString(record: Record<string, unknown>, key: string): string {
 }
 
 function finiteNumber(record: Record<string, unknown>, key: string): number {
-  const value = Number(record[key]);
-  if (!Number.isFinite(value)) {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`${key} must be a finite number`);
   }
   return value;

@@ -1954,10 +1954,10 @@ function fillRecordFromTrade(trade: Trade): FillRecord {
   };
 }
 
-function tradeMatchTimeUnixSecs(value: string): number {
+export function tradeMatchTimeUnixSecs(value: string): number {
   const numeric = Number(value);
   if (Number.isFinite(numeric)) {
-    return Math.trunc(numeric);
+    return Math.trunc(numeric > 10_000_000_000 ? numeric / 1000 : numeric);
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed / 1000) : 0;

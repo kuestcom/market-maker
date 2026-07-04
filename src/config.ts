@@ -54,6 +54,7 @@ export interface Config {
   statePath: string;
   fillStatePath: string;
   fillMaxRecords: number;
+  positionReconcileTolerance: number;
 }
 
 export const HELP_TEXT = `Usage: market-maker [options]
@@ -108,6 +109,7 @@ Options:
   --state-path <path>               MARKET_MAKER_STATE_PATH, default state/seen-markets.json
   --fill-state-path <path>          MARKET_MAKER_FILL_STATE_PATH, default state/fills.json
   --fill-max-records <n>            MARKET_MAKER_FILL_MAX_RECORDS, default 10000
+  --position-reconcile-tolerance <n> MARKET_MAKER_POSITION_RECONCILE_TOLERANCE, default 0.000001
   --help                            Show this help message`;
 
 type CliValue = string | boolean;
@@ -162,6 +164,7 @@ const knownOptions = new Set([
   "state-path",
   "fill-state-path",
   "fill-max-records",
+  "position-reconcile-tolerance",
   "help",
 ]);
 
@@ -457,6 +460,13 @@ export function parseConfig(
       "MARKET_MAKER_FILL_MAX_RECORDS",
       10_000,
     ),
+    positionReconcileTolerance: numberArg(
+      args,
+      env,
+      "position-reconcile-tolerance",
+      "MARKET_MAKER_POSITION_RECONCILE_TOLERANCE",
+      0.000001,
+    ),
   };
 
   validateConfig(config);
@@ -731,6 +741,9 @@ function validateConfig(config: Config): void {
   }
   if (!Number.isInteger(config.fillMaxRecords) || config.fillMaxRecords <= 0) {
     throw new Error("MARKET_MAKER_FILL_MAX_RECORDS must be a positive integer");
+  }
+  if (config.positionReconcileTolerance < 0) {
+    throw new Error("MARKET_MAKER_POSITION_RECONCILE_TOLERANCE cannot be negative");
   }
   if (config.cancelAll && config.cancelAllOnExit) {
     throw new Error(

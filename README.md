@@ -371,4 +371,9 @@ top-of-book depth before quoting.
   Default: 10000.
   Maximum fill records retained in the persisted ledger. The oldest records are
   pruned after each live state refresh to keep cycle latency bounded.
+
+  --position-reconcile-tolerance / MARKET_MAKER_POSITION_RECONCILE_TOLERANCE
+  Default: 0.000001.
+  Maximum allowed difference between live outcome-token balance and fill-ledger
+  position. Larger mismatches skip live quoting because cost basis is uncertain.
 ```

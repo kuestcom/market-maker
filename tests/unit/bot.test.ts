@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     RiskBudget,
     MarketExposure,
+    LiveMarketState,
     affordableBuySize,
     bandContainsPrice,
     bandMissingSize,
@@ -13,11 +14,13 @@ import {
     liquidityRejectReason,
     managedTokenIds,
     openOrderMatchesProposed,
+    positionReconcileErrorFor,
     preflightSnapshotForMarket,
     priceMoveRejectReason,
     riskBreachAppliesToToken,
     staleInputReason,
     tokenCostBasis,
+    tokenLedgerPosition,
     tradeMatchTimeUnixSecs,
     tokenLongInventory,
     type PreflightMarketSnapshot,
@@ -424,6 +427,7 @@ function config(): Config {
         statePath: "state/seen-markets.json",
         fillStatePath: "state/fills.json",
         fillMaxRecords: 10000,
+        positionReconcileTolerance: 0.000001,
     };
 }
 
@@ -484,6 +488,54 @@ describe("market loss guard", () => {
     it("normalizes numeric millisecond trade timestamps to seconds", () => {
         expect(tradeMatchTimeUnixSecs("1700000000123")).toBe(1700000000);
         expect(tradeMatchTimeUnixSecs("1700000000")).toBe(1700000000);
+    });
+
+    it("tracks ledger position from buys and sells", () => {
+        expect(
+            tokenLedgerPosition([
+                fillRecord("buy-a", "yes", Side.BUY, 10, 0.4, 1),
+                fillRecord("sell-a", "yes", Side.SELL, 4, 0.7, 2),
+            ]),
+        ).toBe(6);
+    });
+
+    it("does not let orphaned sells from pruned fills make ledger position negative", () => {
+        expect(
+            tokenLedgerPosition([
+                fillRecord("sell-a", "yes", Side.SELL, 4, 0.7, 2),
+                fillRecord("buy-a", "yes", Side.BUY, 3, 0.4, 3),
+                fillRecord("sell-b", "yes", Side.SELL, 5, 0.7, 4),
+            ]),
+        ).toBe(0);
+    });
+
+    it("reports position reconciliation mismatches beyond tolerance", () => {
+        expect(positionReconcileErrorFor(6.0000005, 6, 0.000001)).toBeUndefined();
+        expect(positionReconcileErrorFor(7, 6, 0.000001)).toMatchObject({
+            liveBalance: 7,
+            ledgerPosition: 6,
+            difference: 1,
+            tolerance: 0.000001,
+        });
+    });
+
+    it("reports unreconciled market state positions", () => {
+        const marketState = new LiveMarketState([
+            {
+                tokenId: "yes",
+                fairPrice: 0.5,
+                balance: 7,
+                costBasis: 2.4,
+                positionReconcileError: positionReconcileErrorFor(7, 6, 0.000001),
+                balanceFetchedAt: 1_000,
+                openOrders: [],
+                openOrdersFetchedAt: 1_000,
+            } as never,
+        ]);
+
+        expect(marketState.positionReconcileRejectReason()).toContain(
+            "live balance 7 differs from fill-ledger position 6",
+        );
     });
 
     it("applies token inventory breaches only to their token", () => {

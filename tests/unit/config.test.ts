@@ -30,6 +30,7 @@ describe("config", () => {
         expect(config.maxDataAgeSecs).toBe(10);
         expect(config.fillStatePath).toBe("state/fills.json");
         expect(config.fillMaxRecords).toBe(10000);
+        expect(config.positionReconcileTolerance).toBe(0.000001);
     });
 
     it("rejects empty event slug", () => {
@@ -195,6 +196,12 @@ describe("config", () => {
     it("rejects fractional fill max records", () => {
         expect(() => parseConfig(["--fill-max-records", "1.5"], {})).toThrow(
             "MARKET_MAKER_FILL_MAX_RECORDS must be a positive integer",
+        );
+    });
+
+    it("rejects negative position reconcile tolerance", () => {
+        expect(() => parseConfig(["--position-reconcile-tolerance", "-0.1"], {})).toThrow(
+            "MARKET_MAKER_POSITION_RECONCILE_TOLERANCE cannot be negative",
         );
     });
 });

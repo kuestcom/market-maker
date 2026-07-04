@@ -122,8 +122,17 @@ export class LiveMarketState {
       }
 
       const balance = await conditionalBalance(client, tokenQuote.tokenId);
+      const fillRecords = fillRecordsForToken(fillLedger, tokenQuote.tokenId);
+      const ledgerPosition = tokenLedgerPosition(fillRecords);
+      const positionReconcileError = config
+        ? positionReconcileErrorFor(
+            balance,
+            ledgerPosition,
+            config.positionReconcileTolerance,
+          )
+        : undefined;
       const costBasis = tokenCostBasis(
-        fillRecordsForToken(fillLedger, tokenQuote.tokenId),
+        fillRecords,
         balance,
         tokenQuote.fairPrice,
       );
@@ -132,6 +141,7 @@ export class LiveMarketState {
         fairPrice: tokenQuote.fairPrice,
         balance,
         costBasis,
+        positionReconcileError,
         balanceFetchedAt: nowMs(),
         openOrders: await openOrdersForToken(client, tokenQuote.tokenId),
         openOrdersFetchedAt: nowMs(),
@@ -243,6 +253,19 @@ export class LiveMarketState {
     return this.tokens.flatMap((token) => token.openOrders);
   }
 
+  positionReconcileRejectReason(): string | undefined {
+    const token = this.tokens.find((state) => state.positionReconcileError);
+    const error = token?.positionReconcileError;
+    if (!token || !error) {
+      return undefined;
+    }
+    return (
+      `token ${token.tokenId} live balance ${error.liveBalance} ` +
+      `differs from fill-ledger position ${error.ledgerPosition} by ` +
+      `${error.difference} (tolerance ${error.tolerance})`
+    );
+  }
+
   riskBreaches(config: Config): RiskBreach[] {
     const breaches: RiskBreach[] = [];
     for (const token of this.tokens) {
@@ -326,9 +349,17 @@ interface LiveTokenState {
   fairPrice: number;
   balance: number;
   costBasis: number;
+  positionReconcileError?: PositionReconcileError;
   balanceFetchedAt: number;
   openOrders: OpenOrder[];
   openOrdersFetchedAt: number;
+}
+
+export interface PositionReconcileError {
+  liveBalance: number;
+  ledgerPosition: number;
+  difference: number;
+  tolerance: number;
 }
 
 export interface ProposedOrder {
@@ -1009,6 +1040,15 @@ async function preflightRiskAudit(
       return { result: "skipCycle" };
     }
 
+    const positionReason = marketState.positionReconcileRejectReason();
+    if (positionReason) {
+      console.log(
+        `preflight risk audit skip ${marketSlug(market)}: ` +
+          `position reconciliation failed (${positionReason})`,
+      );
+      return { result: "skipCycle" };
+    }
+
     scannedMarkets.push({ market, marketState });
     for (const order of marketState.allOpenOrders()) {
       globalBudget.reserveOpenBuyOrder(order);
@@ -1109,6 +1149,14 @@ async function quoteMarket(
     const staleReason = preflightStaleDataReason(tokenQuotes, marketState, nowMs(), config);
     if (staleReason) {
       console.log(`skip live quote ${marketSlug(market)}: stale live data (${staleReason})`);
+      return;
+    }
+    const positionReason = marketState.positionReconcileRejectReason();
+    if (positionReason) {
+      console.log(
+        `skip live quote ${marketSlug(market)}: ` +
+          `position reconciliation failed (${positionReason})`,
+      );
       return;
     }
     for (const tokenQuote of tokenQuotes) {
@@ -1536,6 +1584,14 @@ async function reconcileQuotePlan(
   const staleReason = staleLiveDataReason(plan, marketState, nowMs(), config);
   if (staleReason) {
     console.log(`skip placing ${plan.marketSlug} ${plan.outcome}: stale live data (${staleReason})`);
+    return;
+  }
+  const positionReason = marketState.positionReconcileRejectReason();
+  if (positionReason) {
+    console.log(
+      `skip placing ${plan.marketSlug} ${plan.outcome}: ` +
+        `position reconciliation failed (${positionReason})`,
+    );
     return;
   }
   let openOrders = marketState.openOrders(plan.tokenId);
@@ -1999,6 +2055,34 @@ export function tokenCostBasis(
   return liveBalance <= position
     ? liveBalance * averageCost
     : cost + (liveBalance - position) * fallbackFairPrice;
+}
+
+export function tokenLedgerPosition(fillRecords: FillRecord[]): number {
+  return fillRecords.reduce((position, record) => {
+    if (record.side === Side.BUY) {
+      return position + record.size;
+    }
+    if (record.side === Side.SELL) {
+      return position - record.size;
+    }
+    return position;
+  }, 0);
+}
+
+export function positionReconcileErrorFor(
+  liveBalance: number,
+  ledgerPosition: number,
+  tolerance: number,
+): PositionReconcileError | undefined {
+  const difference = Math.abs(liveBalance - ledgerPosition);
+  return difference > tolerance
+    ? {
+        liveBalance,
+        ledgerPosition,
+        difference,
+        tolerance,
+      }
+    : undefined;
 }
 
 export async function cancelScopeOrders(
